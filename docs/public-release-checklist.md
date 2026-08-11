@@ -14,7 +14,14 @@
 - [ ] Branch protection требует успешный CI и запрещает force push в `main`.
 - [ ] Security policy и канал private vulnerability reporting доступны.
 - [ ] README не обещает функции, отсутствующие в текущем release.
+- [ ] Права и условия использования brand assets явно определены.
 - [ ] Repository description, topics и social preview не содержат внутренних данных.
+
+Рекомендуемые публичные metadata:
+
+- description: `Privacy-conscious Telegram attendance bot with polls, absence tracking, reports, PostgreSQL and Docker`;
+- topics: `telegram-bot`, `aiogram`, `postgresql`, `attendance`, `apscheduler`, `docker-compose`, `python`;
+- social preview: `docs/assets/screw-cover-v1.png`.
 
 После открытия доступа выполните повторный clone без credentials и проверьте
 состав файлов, README links, CI badge и Docker build.
