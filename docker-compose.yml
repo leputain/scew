@@ -1,0 +1,60 @@
+name: screw
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-screw}
+      POSTGRES_USER: ${POSTGRES_USER:-screw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      TZ: Europe/Moscow
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${POSTGRES_BIND_PORT:-20602}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-screw}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  attendance_bot:
+    build:
+      context: .
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        PIP_NO_INDEX: ${PIP_NO_INDEX:-0}
+        APP_VERSION: ${APP_VERSION:-2026.08.11-p2.1}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+        VCS_REF: ${VCS_REF:-unversioned}
+    image: ${IMAGE_REPOSITORY:-screw}:${TAG:-latest}
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,db}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,db}
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+    healthcheck:
+      test: ["CMD-SHELL", "test $$(( $$(date +%s) - $$(cat /tmp/bot_heartbeat_attendance 2>/dev/null || echo 0) )) -lt 120"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  db_data:

@@ -1,0 +1,24 @@
+name: Feature request
+description: Предложить улучшение поведения или эксплуатации
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Проблема
+      description: Какой рабочий сценарий сейчас неудобен или отсутствует?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предлагаемое решение
+      description: Ожидаемый UX, данные и ограничения.
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Риски
+      description: Влияние на приватность, доступ, Telegram API, database и rollout.

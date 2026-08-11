@@ -1,0 +1,49 @@
+name: Bug report
+description: Сообщить о воспроизводимой ошибке без production-данных
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Не прикладывайте токены, `.env`, дампы, Telegram export, raw logs, ФИО или реальные Telegram ID.
+  - type: input
+    id: version
+    attributes:
+      label: Версия
+      description: Значение из файла VERSION или OCI label.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Фактическое поведение
+      description: Опишите симптом и безопасные агрегированные ошибки.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Воспроизведение
+      description: Минимальные шаги с синтетическими значениями.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Компонент
+      options:
+        - Telegram runtime
+        - Polls and attendance
+        - Reports and notifications
+        - Flud statistics
+        - PostgreSQL and migrations
+        - Docker and operations
+    validations:
+      required: true
