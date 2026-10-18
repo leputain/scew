@@ -1,0 +1,6 @@
+# This independent image must never receive SCREW runtime secrets/backups in its build context.
+**
+!Dockerfile.medoed
+!apps
+!apps/medoed_notifier
+!apps/medoed_notifier/*.py

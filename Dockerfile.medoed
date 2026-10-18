@@ -1,0 +1,14 @@
+# Build from the immutable image of the existing SCREW runtime: no dependency rebuild or bot restart.
+# Before build tag the inspected local image ID as this release-specific base tag.
+# Expected image ID: sha256:31dfa8820e5a771c965d812fd40ed041e3dcca0958faf1bd19abec028fbd202f
+# BuildKit does not accept a local sha256 image ID directly in FROM.
+ARG SCREW_BASE_IMAGE=screw:medoed-notifier-base-20261018
+FROM ${SCREW_BASE_IMAGE}
+WORKDIR /app
+COPY --chown=10001:10001 apps/medoed_notifier/ ./apps/medoed_notifier/
+ENV PYTHONPATH=/app PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+USER 10001:10001
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["python3", "-c", "from pathlib import Path; import time; p=Path('/tmp/medoed_notifier_heartbeat'); assert 0 <= time.time()-int(p.read_text()) < 120"]
+CMD ["python3", "-m", "apps.medoed_notifier"]
