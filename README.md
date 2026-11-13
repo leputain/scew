@@ -150,13 +150,15 @@ tests/                     unit and regression tests
 | [Architecture](docs/architecture.md) | компоненты, потоки данных и границы доверия |
 | [Configuration](docs/configuration.md) | переменные окружения и безопасные defaults |
 | [Deployment](docs/deployment.md) | запуск, миграции, backup, rollout и rollback |
+| [Аудит деплоя 14.11.2026](docs/deployment-audit-2026-11-14.md) | проверенный runtime, отличия от Git source и границы проверки |
 | [Operations](docs/operations.md) | health, диагностика и типовые проверки |
 | [Privacy](docs/privacy.md) | персональные данные и статистика чатов |
 | [Release checklist](docs/release-checklist.md) | контроль перед production-релизом |
 | [Telegram polls](docs/telegram-polls.md) | rich poll media и конфигурация вариантов |
 | [Brand assets](docs/assets/README.md) | происхождение и правила использования графики |
 
-Текущая версия хранится в [`VERSION`](VERSION). Production-секреты, реальные
+Версия source хранится в [`VERSION`](VERSION); идентичность установленного
+runtime проверяется отдельно по image ID и отчёту деплоя. Production-секреты, реальные
 Telegram ID, выгрузки и резервные копии не являются частью репозитория.
 
 ## Автор и лицензия
