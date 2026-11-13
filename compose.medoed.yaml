@@ -1,0 +1,49 @@
+# Independent send-only worker. Do not use this file to redeploy the attendance polling bot or PostgreSQL.
+name: screw-medoed-notifier
+services:
+  notifier:
+    build:
+      context: .
+      dockerfile: Dockerfile.medoed
+      args:
+        SCREW_BASE_IMAGE: ${SCREW_BASE_IMAGE:-screw:medoed-notifier-base-20261018}
+    image: ${MEDOED_NOTIFIER_IMAGE:-screw:medoed-notifier-group-20261018}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 40s
+    environment:
+      MEDOED_NOTIFIER_DB_CONFIG_FILE: /run/secrets/medoed_notifier_db
+      SCREW_BOT_TOKEN_FILE: /run/secrets/screw_bot_token
+      MEDOED_NOTIFIER_GROUP_CONFIG_FILE: /run/secrets/medoed_notifier_group
+      MEDOED_NOTIFIER_INTERVAL: "1"
+      TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
+      TZ: Europe/Moscow
+    secrets:
+      - medoed_notifier_db
+      - screw_bot_token
+      - medoed_notifier_group
+    networks:
+      - screw_db
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+secrets:
+  medoed_notifier_db:
+    file: /opt/screw-attendance-bot/secrets/medoed-notifier/database.json
+  screw_bot_token:
+    file: /opt/screw-attendance-bot/secrets/medoed-notifier/bot-token
+  medoed_notifier_group:
+    file: /opt/screw-attendance-bot/secrets/medoed-notifier/group-target.json
+networks:
+  screw_db:
+    external: true
+    name: screw_default

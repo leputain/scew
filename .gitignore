@@ -25,6 +25,8 @@ wheelhouse/*
 !wheelhouse/.gitkeep
 old/
 backups/
+secrets/
+secret/
 media/
 *.dump
 *.sql.gz

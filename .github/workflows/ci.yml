@@ -16,6 +16,18 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fixture
+          POSTGRES_PASSWORD: synthetic-ci-only
+          POSTGRES_DB: screw_forum_test_ci
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U fixture -d screw_forum_test_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
 
     steps:
       - name: Checkout
@@ -40,6 +52,10 @@ jobs:
         run: ruff check apps core tests scripts
 
       - name: Test
+        env:
+          FORUM_TOPIC_VERIFY_ISOLATED: "1"
+          FORUM_TOPIC_TEST_DSN: postgresql://fixture:synthetic-ci-only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/screw_forum_test_ci
+          MEDOED_NOTIFIER_TEST_POSTGRES_DOCKER: "1"
         run: python -m pytest -q tests
 
       - name: Audit publication manifest

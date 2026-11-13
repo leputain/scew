@@ -15,6 +15,7 @@ MAX_TRACKED_FILE_BYTES = 5 * 1024 * 1024
 FORBIDDEN_PATHS = (
     re.compile(r"(^|/)\.env($|\.)"),
     re.compile(r"(^|/)backups?/", re.IGNORECASE),
+    re.compile(r"(^|/)secrets?/", re.IGNORECASE),
     re.compile(r"\.(?:dump|sql\.gz|pem|key|p12|pfx|whl|log)$", re.IGNORECASE),
     re.compile(r"(^|/)redos-local\.repo$", re.IGNORECASE),
     re.compile(r"(^|/)\.gitlab-ci\.yml$", re.IGNORECASE),
@@ -50,10 +51,17 @@ def audit() -> list[str]:
         relative = PurePosixPath(path.relative_to(ROOT).as_posix())
         relative_text = str(relative)
 
+        forbidden = False
         if relative_text != ".env.example":
             for pattern in FORBIDDEN_PATHS:
                 if pattern.search(relative_text):
                     findings.append(f"forbidden path: {relative_text}")
+                    forbidden = True
+                    break
+
+        # Reject sensitive paths without opening the material they contain.
+        if forbidden:
+            continue
 
         if not path.is_file():
             continue

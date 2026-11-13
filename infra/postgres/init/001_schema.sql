@@ -424,3 +424,21 @@ CREATE INDEX IF NOT EXISTS idx_poll_skip_dates_date
     ON screw.poll_skip_dates (skip_date);
 
 COMMENT ON TABLE screw.poll_skip_dates IS 'Даты пропуска опросов (праздники, корпоративы и т.д.)';
+
+-- Forum discovery is opt-in. Migration 006 configures an exact-chat CHECK;
+-- fresh databases reject every capture until that explicit provisioning step.
+CREATE TABLE IF NOT EXISTS screw.forum_topics (
+    chat_id bigint NOT NULL CONSTRAINT forum_topics_chat_id_check CHECK (false),
+    message_thread_id bigint NOT NULL CHECK (message_thread_id > 0),
+    name varchar(128),
+    name_source text CHECK (name_source IN ('service', 'owner_marker')),
+    name_message_id bigint,
+    first_seen_at timestamptz NOT NULL,
+    last_seen_at timestamptz NOT NULL,
+    PRIMARY KEY (chat_id, message_thread_id),
+    CHECK ((name IS NULL AND name_source IS NULL AND name_message_id IS NULL)
+        OR (name IS NOT NULL AND name_source IS NOT NULL AND name_message_id IS NOT NULL))
+);
+
+COMMENT ON TABLE screw.forum_topics IS
+    'Opt-in forum metadata only; no bodies, sender IDs or inferred General topic IDs';

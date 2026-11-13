@@ -150,13 +150,16 @@ tests/                     unit and regression tests
 | [Architecture](docs/architecture.md) | components, data flows, and trust boundaries |
 | [Configuration](docs/configuration.md) | environment variables and secure defaults |
 | [Deployment](docs/deployment.md) | startup, migrations, backup, rollout, and rollback |
+| [Deployment audit, 2026-11-14](docs/deployment-audit-2026-11-14.md) | verified runtime, differences from Git source, and verification scope (Russian) |
+| [VPS source reconciliation](docs/reconciliation-2026-11-14.md) | recovered features, retained safe defaults, and validation without production rollout (Russian) |
 | [Operations](docs/operations.md) | health, diagnostics, and routine checks |
 | [Privacy](docs/privacy.md) | personal data and chat statistics |
 | [Release checklist](docs/release-checklist.md) | production release controls |
 | [Telegram polls](docs/telegram-polls.md) | rich poll media and option configuration |
 | [Brand assets](docs/assets/README.md) | artwork provenance and usage |
 
-The current application version is stored in [`VERSION`](VERSION). Production
+The source version is stored in [`VERSION`](VERSION); identify deployed runtime
+separately by image ID and the deployment audit. Production
 secrets, real Telegram IDs, exports, and backups are not part of the repository.
 
 ## Author and license

@@ -39,6 +39,61 @@ BIRTHDAY_NOTIFY_MESSAGE_THREAD_ID=4242
 корень группы. Для flud collector дополнительно доступен
 `FLUD_MESSAGE_THREAD_ID`.
 
+## Пассивный справочник форумных тем
+
+Сбор работает на существующем потоке aiogram updates и выключен по умолчанию.
+Для включения нужны все три настройки и разрешение этой группы в основном
+`ATTENDANCE_ALLOWED_GROUP_IDS` либо одной из штатных chat-ID переменных:
+
+```env
+FORUM_TOPIC_CAPTURE_ENABLED=0
+FORUM_TOPIC_CAPTURE_CHAT_ID=
+FORUM_TOPIC_CAPTURE_OWNER_ID=
+```
+
+Target должен быть отрицательным bigint, owner — положительным. Неполная,
+ошибочная или не входящая в group allowlist конфигурация отключает запись.
+Неизвестный пользователь по-прежнему не получает доступ к обычным handlers:
+capture не заменяет основной security middleware.
+
+Хранятся только chat/thread/message metadata, время наблюдения и название темы.
+Название поступает из Telegram service event создания/переименования или точного
+маркера `Тема: Название` от настроенного owner. Пересланный маркер, публикация
+от имени канала и маркер другого автора не меняют имя. Тело обычного сообщения,
+reply body и participant identities не сохраняются; ID «Общей» темы не угадывается.
+
+БД сохраняет независимый **exact-chat CHECK**. Fresh schema создаёт таблицу с
+`CHECK(false)`; обычный запуск migration `006` не ослабляет этот guard и не меняет
+существующий production CHECK. Перед первым включением оператор применяет `006`
+с явным migration-only параметром той же группы. Настройки shell задаются
+оператором; этот пример не читает `.env` автоматически:
+
+```bash
+test -n "${FORUM_TOPIC_CAPTURE_CHAT_ID:-}"
+docker compose exec -T \
+  -e PGOPTIONS="-c screw.forum_topic_chat_id=${FORUM_TOPIC_CAPTURE_CHAT_ID}" \
+  db psql -X -v ON_ERROR_STOP=1 \
+  -U "${POSTGRES_USER:-screw}" -d "${POSTGRES_DB:-screw}" \
+  < infra/postgres/migrations/006_forum_topics.sql
+```
+
+Параметр валидируется и превращается в константу CHECK, а не читается каждым
+runtime INSERT. Изменение session GUC после миграции не расширяет доступ.
+Смена группы при наличии строк другого chat атомарно отклоняется; прежний CHECK
+и данные сохраняются. Не удаляйте эти строки ради обхода проверки — смена scope
+требует отдельного плана. Только после настройки БД включайте capture (`1`).
+При несовпадении env/DB guard запись отклоняется, основной handler продолжается;
+capture ограничен 0.5 секунды, в диагностике выводится только тип исключения.
+
+Code rollback: выключить capture и вернуть предыдущий image. Таблицу и текущий
+exact-chat guard сохранять; обратная миграция/удаление данных не нужны.
+`scripts/verify_forum_topics.py` **записывает синтетические строки с rollback**:
+это не read-only smoke и не production-команда. Он принимает только явный
+`FORUM_TOPIC_TEST_DSN` для loopback/изолированного Docker hostname `postgres`,
+database `screw_forum_test_*` и `FORUM_TOPIC_VERIFY_ISOLATED=1`, без app DB config.
+Fixture provisioned для synthetic chat из verifier; production значения в него
+не передавать. Интеграционный pytest использует тот же изолированный контракт.
+
 ## Welcome message
 
 Контакты и внутренняя инструкция не зашиваются в source:
