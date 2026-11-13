@@ -9,6 +9,7 @@ from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ErrorEvent
 
+from apps.attendance_bot.app.aiogram_app.forum_topics import ForumTopicCaptureMiddleware
 from apps.attendance_bot.app.aiogram_app.middlewares import (
     AiogramIngressMiddleware,
     AiogramSecurityPolicyMiddleware,
@@ -66,6 +67,7 @@ def create_aiogram_dispatcher() -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
 
     dp.update.outer_middleware(AiogramIngressMiddleware())
+    dp.update.outer_middleware(ForumTopicCaptureMiddleware())
     dp.update.middleware(AiogramSecurityPolicyMiddleware())
     for router in AIOGRAM_ROUTERS:
         dp.include_router(router)

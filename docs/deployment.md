@@ -1,9 +1,16 @@
 # Deployment
 
+## Source после согласования с VPS
+
+Функциональные server-only изменения перенесены в source с безопасной
+конфигурацией: [решения и проверки 14.11.2026](reconciliation-2026-11-14.md).
+Это не rollout. Рабочие образы и live Compose остались прежними; следующий
+выпуск требует согласования env, точного forum DB guard и shared DB/network.
+
 ## Подтверждённое состояние на 14.11.2026
 
 Source и работающий runtime имеют разные идентификаторы. Репозиторий содержит
-`VERSION=1.2`; проверенный checkout — `codex/medoed-notifications`, commit
+`VERSION=1.2`; исходный checkout аудита — `codex/medoed-notifications`, commit
 `93862ec414045f201849cc8b574037156abb9158`. На сервере нет Git checkout:
 основной bot работает из image
 `sha256:31dfa8820e5a771c965d812fd40ed041e3dcca0958faf1bd19abec028fbd202f`,

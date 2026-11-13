@@ -8,6 +8,10 @@
 **/__pycache__/
 *.py[cod]
 backups/
+secrets/
+secret/
+**/secrets/
+**/secret/
 docs/
 media/
 old/

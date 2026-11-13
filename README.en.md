@@ -151,6 +151,7 @@ tests/                     unit and regression tests
 | [Configuration](docs/configuration.md) | environment variables and secure defaults |
 | [Deployment](docs/deployment.md) | startup, migrations, backup, rollout, and rollback |
 | [Deployment audit, 2026-11-14](docs/deployment-audit-2026-11-14.md) | verified runtime, differences from Git source, and verification scope (Russian) |
+| [VPS source reconciliation](docs/reconciliation-2026-11-14.md) | recovered features, retained safe defaults, and validation without production rollout (Russian) |
 | [Operations](docs/operations.md) | health, diagnostics, and routine checks |
 | [Privacy](docs/privacy.md) | personal data and chat statistics |
 | [Release checklist](docs/release-checklist.md) | production release controls |

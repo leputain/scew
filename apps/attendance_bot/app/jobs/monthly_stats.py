@@ -8,7 +8,7 @@ from calendar import monthrange
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from core.screw_core.models.enums import EventType, NotifyChannel
@@ -21,6 +21,7 @@ from core.screw_core.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Telegram text limits count UTF-16 units; reserve space for the preview warning.
 MAX_REPORT_LENGTH = 3800
 DEPARTMENT_CODE = "ОЗКО"
 _MONTH_NAMES_GENITIVE = {
@@ -86,6 +87,11 @@ def _format_count(value: int) -> str:
     return f"{value:,}".replace(",", " ")
 
 
+def _message_units(text: str) -> int:
+    """Conservatively budget escaped HTML in Telegram's UTF-16 units."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _render_perfect_block(prefix: str, names: list[str], *, max_length: int) -> str:
     if not names:
         return prefix
@@ -98,7 +104,7 @@ def _render_perfect_block(prefix: str, names: list[str], *, max_length: int) -> 
         omitted = len(names) - len(candidate)
         suffix = f"\n… и ещё {omitted}" if omitted else ""
         block = opening + "\n".join(candidate) + suffix + closing
-        if len(prefix) + 1 + len(block) > max_length:
+        if _message_units(prefix) + 1 + _message_units(block) > max_length:
             break
         rendered = candidate
 
@@ -110,6 +116,91 @@ def _render_perfect_block(prefix: str, names: list[str], *, max_length: int) -> 
     return prefix + "\n" + opening + "\n".join(rendered) + suffix + closing
 
 
+@dataclass(frozen=True, slots=True)
+class FirstPlaceRank:
+    user_id: int
+    name: str
+    count: int
+    best_seconds: Decimal
+    rank: int
+
+
+def _positive_response_seconds(raw: Any) -> Decimal | None:
+    if raw is None:
+        return None
+    try:
+        seconds = Decimal(str(raw))
+    except InvalidOperation:
+        return None
+    return seconds if seconds.is_finite() and seconds > 0 else None
+
+
+def _rank_first_places(
+    responses: list[dict[str, Any]], names_by_user: dict[int, str]
+) -> list[FirstPlaceRank]:
+    """Competition ranking: wins DESC, best WINNING time ASC; credit co-winners."""
+    by_poll: dict[int, list[tuple[int, Decimal]]] = defaultdict(list)
+    for row in responses:
+        seconds = _positive_response_seconds(row.get("response_seconds"))
+        if seconds is not None:
+            by_poll[int(row["poll_run_id"])].append((int(row["user_id"]), seconds))
+
+    counts: Counter[int] = Counter()
+    winning_best: dict[int, Decimal] = {}
+    for answers in by_poll.values():
+        winning_time = min(seconds for _, seconds in answers)
+        for user_id in {uid for uid, seconds in answers if seconds == winning_time}:
+            counts[user_id] += 1
+            winning_best[user_id] = min(winning_best.get(user_id, winning_time), winning_time)
+
+    ordered = sorted(counts, key=lambda uid: (
+        -counts[uid], winning_best[uid], names_by_user.get(uid, "—"), uid,
+    ))
+    result: list[FirstPlaceRank] = []
+    previous = None
+    rank = 0
+    for position, user_id in enumerate(ordered, 1):
+        score = (counts[user_id], winning_best[user_id])
+        if score != previous:
+            rank = position
+        previous = score
+        result.append(FirstPlaceRank(
+            user_id, _shorten_name(names_by_user.get(user_id, "—")),
+            counts[user_id], winning_best[user_id], rank,
+        ))
+    return result
+
+
+def _format_winning_seconds(seconds: Decimal) -> str:
+    # Preserve exact DB precision: visibly different ranks must not look tied.
+    rendered = format(seconds, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return f"{rendered} сек."
+
+
+def _append_bounded_section(
+    lines: list[str], heading: str, rows: list[str], *, max_length: int, omitted_label: str
+) -> None:
+    """Keep whole escaped rows and explicitly disclose omitted leaderboard entries."""
+    if not rows:
+        return
+    lines.extend(["", heading])
+    prefix = "\n".join(lines)
+    rendered: list[str] = []
+    for row in rows:
+        candidate = rendered + [row]
+        remaining = len(rows) - len(candidate)
+        suffix = f"\n<i>Список сокращён; не показано {omitted_label}: {_format_count(remaining)}.</i>" if remaining else ""
+        if _message_units(prefix) + 1 + _message_units("\n".join(candidate)) + _message_units(suffix) > max_length:
+            break
+        rendered = candidate
+    lines.extend(rendered)
+    remaining = len(rows) - len(rendered)
+    if remaining:
+        lines.append(f"<i>Список сокращён; не показано {omitted_label}: {_format_count(remaining)}.</i>")
+
+
 def _build_report_html(
     *,
     year: int,
@@ -118,8 +209,8 @@ def _build_report_html(
     expected_count: int,
     response_count: int,
     participation_pct: int,
-    fastest: list[tuple[str, float]],
-    first_top: list[tuple[str, int]],
+    fastest: list[tuple[str, float | Decimal]],
+    first_top: list[FirstPlaceRank],
     perfect_names: list[str],
 ) -> str:
     month_name = _MONTH_NAMES_GENITIVE.get(month, str(month))
@@ -133,28 +224,39 @@ def _build_report_html(
         f"Без пропусков: <b>{_format_count(len(perfect_names))} человек</b>",
     ]
 
-    if fastest:
-        lines.extend(["", "⚡ <b>Лучшее время месяца</b>"])
-        medals = ["🥇", "🥈", "🥉"]
-        lines.extend(
+    footer = f"✅ <b>Ответили на все ожидаемые опросы — {_format_count(len(perfect_names))}</b>"
+    perfect_fallback = (
+        f"\n<i>Список не помещается в сообщение: {_format_count(len(perfect_names))} человек.</i>"
+        if perfect_names else ""
+    )
+    sections_budget = MAX_REPORT_LENGTH - _message_units(footer) - 2 - _message_units(perfect_fallback)
+    leaders = [entry for entry in first_top if entry.rank <= 3]
+    first_heading = "🎯 <b>Чаще всех отвечали первыми</b>"
+    first_fallback = f"<i>Список сокращён; не показано призёров: {_format_count(len(leaders))}.</i>"
+    first_reserve = _message_units(first_heading) + _message_units(first_fallback) + 3 if leaders else 0
+    medals = ["🥇", "🥈", "🥉"]
+    _append_bounded_section(
+        lines,
+        "⚡ <b>Лучшее время месяца</b>",
+        [
             f"{medals[index]} {_html(name)} — {_format_seconds(seconds)}"
             for index, (name, seconds) in enumerate(fastest[:3])
-        )
-
-    if first_top:
-        lines.extend(["", "🎯 <b>Чаще всех отвечали первыми</b>"])
-        medals = ["🥇", "🥈", "🥉"]
-        lines.extend(
-            f"{medals[index]} {_html(name)} — {count} раз"
-            for index, (name, count) in enumerate(first_top[:3])
-        )
-
-    lines.extend(
-        [
-            "",
-            f"✅ <b>Ответили на все ожидаемые опросы — {_format_count(len(perfect_names))}</b>",
-        ]
+        ],
+        max_length=sections_budget - first_reserve,
+        omitted_label="участников",
     )
+    _append_bounded_section(
+        lines,
+        first_heading,
+        [
+            f"{medals[entry.rank - 1]} {_html(entry.name)} — {entry.count} раз"
+            f" · лучшее время победы: {_format_winning_seconds(entry.best_seconds)}"
+            for entry in leaders
+        ],
+        max_length=sections_budget,
+        omitted_label="призёров",
+    )
+    lines.extend(["", footer])
     prefix = "\n".join(lines)
     return _render_perfect_block(prefix, perfect_names, max_length=MAX_REPORT_LENGTH)
 
@@ -205,13 +307,10 @@ async def build_monthly_stats_report(
     ]
     perfect_names = sorted(_shorten_name(names_by_user.get(user_id, "—")) for user_id in perfect_user_ids)
 
-    best_by_user: dict[int, float] = {}
+    best_by_user: dict[int, Decimal] = {}
     for row in valid_responses:
-        raw_seconds = row.get("response_seconds")
-        if raw_seconds is None:
-            continue
-        seconds = float(raw_seconds)
-        if seconds <= 0:
+        seconds = _positive_response_seconds(row.get("response_seconds"))
+        if seconds is None:
             continue
         user_id = int(row["user_id"])
         best_by_user[user_id] = min(best_by_user.get(user_id, seconds), seconds)
@@ -223,25 +322,7 @@ async def build_monthly_stats_report(
         )[:3]
     ]
 
-    first_counts: Counter[int] = Counter()
-    responses_by_poll: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for row in valid_responses:
-        raw_seconds = row.get("response_seconds")
-        if raw_seconds is not None and float(raw_seconds) > 0:
-            responses_by_poll[int(row["poll_run_id"])].append(row)
-    for responses in responses_by_poll.values():
-        first = min(
-            responses,
-            key=lambda row: (float(row["response_seconds"]), int(row["user_id"])),
-        )
-        first_counts[int(first["user_id"])] += 1
-    first_top = [
-        (_shorten_name(names_by_user.get(user_id, "—")), count)
-        for user_id, count in sorted(
-            first_counts.items(),
-            key=lambda item: (-item[1], _shorten_name(names_by_user.get(item[0], "—"))),
-        )[:3]
-    ]
+    first_top = _rank_first_places(valid_responses, names_by_user)
 
     expected_count = len(expected_pairs)
     response_count = len(seen_response_pairs)

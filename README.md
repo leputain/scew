@@ -151,6 +151,7 @@ tests/                     unit and regression tests
 | [Configuration](docs/configuration.md) | переменные окружения и безопасные defaults |
 | [Deployment](docs/deployment.md) | запуск, миграции, backup, rollout и rollback |
 | [Аудит деплоя 14.11.2026](docs/deployment-audit-2026-11-14.md) | проверенный runtime, отличия от Git source и границы проверки |
+| [Согласование source с VPS](docs/reconciliation-2026-11-14.md) | перенесённые функции, сохранённые безопасные настройки и проверки без production rollout |
 | [Operations](docs/operations.md) | health, диагностика и типовые проверки |
 | [Privacy](docs/privacy.md) | персональные данные и статистика чатов |
 | [Release checklist](docs/release-checklist.md) | контроль перед production-релизом |
