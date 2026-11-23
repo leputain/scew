@@ -276,6 +276,23 @@ CREATE INDEX IF NOT EXISTS idx_poll_expected_users_department_poll
     ON poll_expected_users (department_id, poll_run_id);
 ALTER TABLE poll_runs ADD COLUMN IF NOT EXISTS reminder_message_id BIGINT;
 
+ALTER TABLE screw.poll_runs ADD COLUMN IF NOT EXISTS option_snapshot JSONB;
+ALTER TABLE screw.poll_runs ADD COLUMN IF NOT EXISTS summary_pending BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE screw.poll_runs ADD COLUMN IF NOT EXISTS summary_ignore_day_off BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS screw.poll_vote_updates (
+    poll_run_id BIGINT NOT NULL REFERENCES screw.poll_runs(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL REFERENCES screw.users(id) ON DELETE CASCADE,
+    update_id BIGINT NOT NULL,
+    PRIMARY KEY (poll_run_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS screw.telegram_report_deliveries (
+    delivery_key TEXT PRIMARY KEY,
+    state TEXT NOT NULL CHECK (state IN ('sending', 'sent', 'failed', 'uncertain')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Индекс для быстрого поиска просроченных открытых опросов
 CREATE INDEX IF NOT EXISTS idx_poll_runs_status_closes_at ON poll_runs(status, closes_at) WHERE status = 'open';
 

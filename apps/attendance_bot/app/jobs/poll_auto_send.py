@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from apps.attendance_bot.app.config import get_attendance_group_id
@@ -16,8 +16,9 @@ from apps.attendance_bot.app.services.poll_runtime import (
     _load_poll_config,
     _pin_poll_message,
     _remember_poll_option_mapping,
+    poll_close_at,
+    register_published_poll,
     get_local_date,
-    get_local_datetime,
     get_poll_scheduler,
     send_absence_message,
 )
@@ -40,8 +41,13 @@ async def _send_poll(
     *,
     chat_id: int,
     question: str,
+    closes_at: datetime | None = None,
 ):
     poll_options, plain_options, api_kwargs = build_aiogram_poll_payload(poll_payload)
+    deadline_kwargs = {}
+    if closes_at is not None:
+        api_kwargs.pop("open_period", None)
+        deadline_kwargs["close_date"] = closes_at
     return await send_aiogram_poll_with_fallback(
         bot,
         logger,
@@ -52,6 +58,7 @@ async def _send_poll(
         api_kwargs=api_kwargs,
         is_anonymous=False,
         allows_multiple_answers=False,
+        **deadline_kwargs,
     )
 
 
@@ -96,6 +103,7 @@ async def job_poll_auto_send(bot: Any) -> None:
     poll_payload = poll_config.payload
     duration = poll_config.duration_seconds
     reminder_minutes = poll_config.reminder_minutes
+    closes_at = poll_close_at(duration)
 
     poll_question = f"Явка за {poll_date.strftime('%d.%m.%Y')}"
     try:
@@ -104,6 +112,7 @@ async def job_poll_auto_send(bot: Any) -> None:
             poll_payload,
             chat_id=group_id,
             question=poll_question,
+            closes_at=closes_at,
         )
     except Exception as e:
         logger.error("AUTO_SEND_POLL: failed to send poll: %s", e)
@@ -120,22 +129,12 @@ async def job_poll_auto_send(bot: Any) -> None:
         poll_config.persistent_to_choice,
     )
 
-    closes_at = get_local_datetime() + timedelta(seconds=duration)
-
-    result = await PollsService.create_daily_poll(
-        poll_date=poll_date,
-        chat_id=group_id,
-        message_id=poll_message.message_id,
-        telegram_poll_id=telegram_poll_id,
-        closes_at=closes_at,
+    result = await register_published_poll(
+        bot, poll_message, poll_date=poll_date, chat_id=group_id, closes_at=closes_at, config=poll_config,
     )
 
     if not result.success:
         logger.error("AUTO_SEND_POLL: DB error: %s", result.error)
-        try:
-            await bot.stop_poll(chat_id=group_id, message_id=poll_message.message_id)
-        except Exception as e:
-            logger.debug("stop_poll cleanup failed: %s", e)
         return
 
     poll_id = result.poll_id

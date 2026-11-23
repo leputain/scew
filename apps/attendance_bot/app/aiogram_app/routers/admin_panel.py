@@ -52,8 +52,6 @@ from core.screw_core.repos.flud_repo import FludRepo
 from core.screw_core.repos.poll_config_repo import PollConfigRepo
 from core.screw_core.repos.registration_repo import RegistrationRepo
 from core.screw_core.repos.users_repo import UsersRepo
-from core.screw_core.services.notify import NotifyService
-from core.screw_core.services.permissions import OZKO_DEPARTMENT_ID
 from core.screw_core.services.polls import PollError, PollsService
 from core.screw_core.services.registration import RegistrationService
 from core.screw_core.services.report_delivery_service import ReportDeliveryService
@@ -1027,29 +1025,6 @@ async def _handle_poll_close(callback: CallbackQuery, admin_id: int, bot: Bot) -
         parameters={"poll_id": poll_id, "poll_date": str(poll_date) if poll_date else None},
     )
 
-    check_date = poll_date if isinstance(poll_date, date) else poll_core.get_local_date()
-    await asyncio.sleep(10)
-    try:
-        await asyncio.wait_for(
-            NotifyService.run_post_poll_checks(
-                bot,
-                check_date,
-                department_id=OZKO_DEPARTMENT_ID,
-                ignore_day_off=True,
-                poll_id=poll_id,
-            ),
-            timeout=120,
-        )
-    except asyncio.TimeoutError:
-        logger.error("aiogram admin_panel poll_close: post checks timeout poll_id=%s", poll_id)
-    except Exception as exc:
-        logger.exception("aiogram admin_panel poll_close: post checks failed poll_id=%s: %s", poll_id, exc)
-    await poll_core.send_poll_close_summary(
-        bot,
-        poll_data,
-        department_id=OZKO_DEPARTMENT_ID,
-    )
-    await poll_core.send_department_lists_summary(bot, poll_data)
 
 
 @router.callback_query(F.data == "admin:poll:create:skipday_ok")
@@ -1120,6 +1095,8 @@ async def _handle_poll_create(
     poll_options, plain_options, api_kwargs = build_aiogram_poll_payload(poll_config.payload)
     duration = poll_config.duration_seconds
     reminder_minutes = poll_config.reminder_minutes
+    closes_at = poll_core.poll_close_at(duration)
+    api_kwargs.pop("open_period", None)
     poll_question = f"Явка за {poll_date.strftime('%d.%m.%Y')}"
     try:
         poll_message = await send_aiogram_poll_with_fallback(
@@ -1130,6 +1107,7 @@ async def _handle_poll_create(
             options=poll_options,
             plain_options=plain_options,
             api_kwargs=api_kwargs,
+            close_date=closes_at,
             is_anonymous=False,
             allows_multiple_answers=False,
         )
@@ -1150,19 +1128,10 @@ async def _handle_poll_create(
         poll_config.option_to_choice,
         poll_config.persistent_to_choice,
     )
-    closes_at = poll_core.get_local_datetime() + timedelta(seconds=duration)
-    result = await PollsService.create_daily_poll(
-        poll_date=poll_date,
-        chat_id=group_id,
-        message_id=poll_message.message_id,
-        telegram_poll_id=telegram_poll_id,
-        closes_at=closes_at,
+    result = await poll_core.register_published_poll(
+        bot, poll_message, poll_date=poll_date, chat_id=group_id, closes_at=closes_at, config=poll_config,
     )
     if not result.success:
-        try:
-            await bot.stop_poll(chat_id=group_id, message_id=poll_message.message_id)
-        except Exception as exc:
-            logger.debug("aiogram admin_panel poll_create cleanup stop_poll failed: %s", exc)
         await _edit_callback_message(callback, f"❌ Ошибка: {result.error}", reply_markup=_nav_markup())
         await panel_core.record_admin_action(action="poll_create", admin_id=admin_id, error_summary=str(result.error))
         return

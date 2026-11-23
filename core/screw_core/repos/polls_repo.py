@@ -4,11 +4,18 @@
 Работа с таблицей poll_runs.
 """
 
+import json
 from datetime import date, datetime
-from typing import Any
+from typing import Any, TypedDict
 
 from core.screw_core.db.tx import acquire_connection, parse_rowcount, transaction
 from core.screw_core.models.enums import PollStatus
+
+
+class PollOptionSnapshot(TypedDict):
+    index: int
+    persistent_id: str | None
+    choice: str
 
 
 class PollsRepo:
@@ -74,28 +81,21 @@ class PollsRepo:
         message_id: int | None = None,
         telegram_poll_id: str | None = None,
         closes_at: datetime | None = None,
-    ) -> tuple[int, int]:
+        option_snapshot: list[PollOptionSnapshot] | None = None,
+    ) -> tuple[int | None, int]:
         """Create/recreate a poll and replace its expected-user snapshot atomically."""
         async with transaction() as conn:
             existing_poll_id = await conn.fetchval(
                 "SELECT id FROM screw.poll_runs WHERE poll_date = $1 FOR UPDATE",
                 poll_date,
             )
-            deleted_marks = 0
-            if existing_poll_id is not None:
-                result = await conn.execute(
-                    "DELETE FROM screw.attendance_marks WHERE poll_run_id = $1",
-                    existing_poll_id,
-                )
-                deleted_marks = parse_rowcount(result)
-
             captured_at = datetime.now()
             poll_id = await conn.fetchval(
                 """
                 INSERT INTO screw.poll_runs
                     (poll_date, chat_id, message_id, telegram_poll_id, published_at,
-                     closes_at, status, expected_users_snapshot_at)
-                VALUES ($1, $2, $3, $4, $5, $6, 'open', $7)
+                     closes_at, status, expected_users_snapshot_at, option_snapshot)
+                VALUES ($1, $2, $3, $4, $5, $6, 'open', $7, $8::jsonb)
                 ON CONFLICT (poll_date) DO UPDATE SET
                     chat_id = EXCLUDED.chat_id,
                     message_id = EXCLUDED.message_id,
@@ -105,7 +105,11 @@ class PollsRepo:
                     status = 'open',
                     reminder_sent_at = NULL,
                     closed_at = NULL,
+                    summary_pending = FALSE,
+                    reminder_message_id = NULL,
+                    option_snapshot = EXCLUDED.option_snapshot,
                     expected_users_snapshot_at = EXCLUDED.expected_users_snapshot_at
+                WHERE poll_runs.status <> 'open' OR EXCLUDED.option_snapshot IS NULL
                 RETURNING id
                 """,
                 poll_date,
@@ -115,7 +119,21 @@ class PollsRepo:
                 captured_at if message_id else None,
                 closes_at,
                 captured_at,
+                json.dumps(option_snapshot) if option_snapshot is not None else None,
             )
+
+            if poll_id is None:
+                return None, 0
+            deleted_marks = 0
+            if existing_poll_id is not None:
+                result = await conn.execute(
+                    "DELETE FROM screw.attendance_marks WHERE poll_run_id = $1 AND source = 'poll'",
+                    existing_poll_id,
+                )
+                deleted_marks = parse_rowcount(result)
+                await conn.execute(
+                    "DELETE FROM screw.poll_vote_updates WHERE poll_run_id = $1", existing_poll_id
+                )
 
             await conn.execute(
                 "DELETE FROM screw.poll_expected_users WHERE poll_run_id = $1",
@@ -276,7 +294,10 @@ class PollsRepo:
             return parse_rowcount(result)
 
     @staticmethod
-    async def close_poll(poll_id: int) -> None:
+    async def close_poll(
+        poll_id: int, *, telegram_poll_id: str | None = None, publish_summary: bool = False,
+        summary_ignore_day_off: bool = False,
+    ) -> bool:
         """
         Закрыть опрос.
 
@@ -285,11 +306,16 @@ class PollsRepo:
         """
         async with transaction() as conn:
             poll_status = await conn.fetchval(
-                "SELECT status FROM screw.poll_runs WHERE id = $1 FOR UPDATE",
+                """
+                SELECT status FROM screw.poll_runs
+                WHERE id = $1 AND telegram_poll_id IS NOT DISTINCT FROM $2
+                FOR UPDATE
+                """,
                 poll_id,
+                telegram_poll_id,
             )
             if poll_status != PollStatus.OPEN.value:
-                return
+                return False
 
             await conn.execute(
                 """
@@ -316,12 +342,58 @@ class PollsRepo:
             await conn.execute(
                 """
                 UPDATE screw.poll_runs
-                SET status = $2, closed_at = $3
+                SET status = $2, closed_at = NOW(), summary_pending = $3, summary_ignore_day_off = $4
                 WHERE id = $1 AND status = 'open'
                 """,
                 poll_id,
                 PollStatus.CLOSED.value,
-                datetime.now(),
+                publish_summary,
+                summary_ignore_day_off,
+            )
+            return True
+
+    @staticmethod
+    async def get_summary_attendance(
+        poll_id: int, telegram_poll_id: str | None, department_id: int,
+    ) -> list[dict[str, Any]]:
+        async with acquire_connection() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT u.full_name, am.choice
+                FROM screw.poll_runs pr
+                JOIN screw.poll_expected_users pe ON pe.poll_run_id = pr.id
+                JOIN screw.users u ON u.id = pe.user_id
+                LEFT JOIN screw.attendance_marks am ON am.user_id = pe.user_id
+                  AND am.mark_date = pr.poll_date AND (am.source <> 'poll' OR am.poll_run_id = pr.id)
+                WHERE pr.id = $1 AND pr.telegram_poll_id IS NOT DISTINCT FROM $2
+                  AND pe.department_id = $3 AND u.role <> 'no_tg_worker'
+                """,
+                poll_id, telegram_poll_id, department_id,
+            )
+            return [dict(row) for row in rows]
+
+    @staticmethod
+    async def get_pending_summaries(limit: int) -> list[dict[str, Any]]:
+        async with acquire_connection() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT * FROM screw.poll_runs
+                WHERE summary_pending AND closed_at <= NOW() - INTERVAL '60 seconds'
+                ORDER BY closed_at LIMIT $1
+                """,
+                limit,
+            )
+            return [dict(row) for row in rows]
+
+    @staticmethod
+    async def finish_summary(poll_id: int, telegram_poll_id: str | None) -> None:
+        async with acquire_connection() as conn:
+            await conn.execute(
+                """
+                UPDATE screw.poll_runs SET summary_pending = FALSE
+                WHERE id = $1 AND telegram_poll_id IS NOT DISTINCT FROM $2 AND status = 'closed'
+                """,
+                poll_id, telegram_poll_id,
             )
 
     @staticmethod

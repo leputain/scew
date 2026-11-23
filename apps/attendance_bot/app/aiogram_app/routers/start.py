@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -12,7 +13,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from apps.attendance_bot.app.aiogram_app.keyboards import to_aiogram_markup
+from apps.attendance_bot.app.aiogram_app.routers.week_widget import week_widget_enabled
 from apps.attendance_bot.app.config import is_dev_self_registration_enabled
+from apps.attendance_bot.app.services.poll_runtime import format_time, get_local_date, get_local_datetime, poll_message_url
 from apps.attendance_bot.app.ui.registration_texts import (
     MSG_ALREADY_REGISTERED,
     MSG_ASK_FULL_NAME,
@@ -93,7 +96,9 @@ async def _show_user_panel(message: Message, telegram_id: int) -> None:
     is_privileged = perms.is_manager or perms.is_admin
     is_ozko = perms.department_id == OZKO_DEPARTMENT_ID if perms.department_id else await _is_user_ozko(telegram_id)
     text = await start_views.build_dashboard_text(telegram_id)
-    keyboard = user_panel_keyboard(is_privileged=is_privileged, is_ozko=is_ozko)
+    keyboard = user_panel_keyboard(
+        is_privileged=is_privileged, is_ozko=is_ozko, show_week_widget=week_widget_enabled(telegram_id),
+    )
     sent = await message.answer(text, reply_markup=to_aiogram_markup(keyboard), parse_mode="HTML")
     await track_bot_message(telegram_id, sent.chat.id, sent.message_id, screen="user_panel")
 
@@ -162,7 +167,9 @@ async def _edit_user_panel(callback: CallbackQuery) -> None:
     await _edit_callback_message(
         callback,
         text,
-        reply_markup=to_aiogram_markup(user_panel_keyboard(is_privileged=is_privileged, is_ozko=is_ozko)),
+        reply_markup=to_aiogram_markup(user_panel_keyboard(
+            is_privileged=is_privileged, is_ozko=is_ozko, show_week_widget=week_widget_enabled(telegram_id),
+        )),
         parse_mode="HTML",
         screen="panel:user",
     )
@@ -302,7 +309,7 @@ async def user_today(callback: CallbackQuery) -> None:
         return
 
     telegram_id = callback.from_user.id
-    today = date.today()
+    today = get_local_date()
     user = await UsersRepo.get_by_telegram_id(telegram_id)
     if not user:
         await _edit_callback_message(
@@ -317,7 +324,7 @@ async def user_today(callback: CallbackQuery) -> None:
     perms = await get_permissions(telegram_id)
     is_privileged = perms.is_manager or perms.is_admin
     user_id = user["id"]
-    full_name = user.get("full_name") or "—"
+    full_name = escape(user.get("full_name") or "—")
     status = await DayStatusRepo.get_status(user_id, today)
     attendance_mark = await AttendanceRepo.get_mark(user_id, today)
     weekday = start_views.WEEKDAY_NAMES_SHORT[today.weekday()]
@@ -333,15 +340,35 @@ async def user_today(callback: CallbackQuery) -> None:
         status_label = start_views.STATUS_LABELS.get(kind, kind)
         text += f"📋 Статус: {status_label}"
         if status.get("comment"):
-            text += f"\n💬 {status.get('comment')}"
+            text += f"\n💬 {escape(str(status['comment']))}"
     else:
         text += "📋 Статус: <i>обычный рабочий день</i>"
 
-    if attendance_mark:
-        choice = attendance_mark.get("choice", "")
-        text += f"\n✅ Опрос: {start_views.ATTENDANCE_CHOICE_LABELS.get(choice, choice)}"
+    poll = await PollsRepo.get_by_date(today)
+    closes_at = poll.get("closes_at") if poll else None
+    poll_open = bool(
+        poll and poll["status"] == "open" and (
+            not closes_at or (closes_at if closes_at.tzinfo else closes_at.replace(
+                tzinfo=get_local_datetime().tzinfo
+            )) > get_local_datetime()
+        )
+    )
+    poll_url = poll_message_url(poll) if poll_open and poll else None
+
+    if status and status["kind"] in {"VACATION", "SICK", "LEAVE"}:
+        text += "\nОпрос: сегодня ответ не ожидается"
+    elif attendance_mark:
+        choice = attendance_mark["choice"]
+        text += f"\n✅ Отметка: {start_views.ATTENDANCE_CHOICE_LABELS.get(choice, choice)}"
+    elif poll_open:
+        text += "\n⏳ Опрос: <i>ответ ещё не получен</i>"
+    elif poll:
+        text += "\nОпрос закрыт · отметки нет"
     else:
-        text += "\n⏳ Опрос: <i>не отмечено</i>"
+        text += "\nОпрос пока не опубликован"
+
+    if poll_open and closes_at:
+        text += f"\nЗакрытие опроса в <b>{format_time(closes_at)}</b>"
 
     if is_privileged:
         try:
@@ -384,7 +411,7 @@ async def user_today(callback: CallbackQuery) -> None:
     await _edit_callback_message(
         callback,
         text,
-        reply_markup=to_aiogram_markup(user_status_navigation_keyboard(is_privileged=is_privileged)),
+        reply_markup=to_aiogram_markup(user_status_navigation_keyboard(is_privileged=is_privileged, poll_url=poll_url)),
         parse_mode="HTML",
         screen="user:today",
     )

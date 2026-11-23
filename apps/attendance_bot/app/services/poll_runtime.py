@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from apps.attendance_bot.app.config import (
@@ -21,10 +22,12 @@ from apps.attendance_bot.app.config import (
 from apps.attendance_bot.app.utils.poll_payload import PollPayload, build_poll_payload
 from core.screw_core.repos.attendance_repo import AttendanceRepo
 from core.screw_core.models.enums import AttendanceChoice, UserRole
+from core.screw_core.repos.polls_repo import PollOptionSnapshot, PollsRepo
 from core.screw_core.repos.day_status_repo import DayStatusRepo
 from core.screw_core.repos.users_repo import UsersRepo
 from core.screw_core.services.permissions import OZKO_DEPARTMENT_ID, OSB_DEPARTMENT_ID
-from core.screw_core.services.polls import PollsService
+from core.screw_core.services.polls import PollError, PollResult, PollsService
+from core.screw_core.services.telegram_report_delivery import send_tracked_report
 from core.screw_core.utils.logging import get_logger
 from core.screw_core.utils.timezone import get_tzinfo
 
@@ -161,8 +164,69 @@ def _remember_poll_option_mapping(
         _POLL_PERSISTENT_TO_CHOICE[telegram_poll_id] = mapping
 
 
-async def _resolve_choice_from_poll_answer(poll_answer) -> tuple[AttendanceChoice | None, str]:
+def poll_option_snapshot(poll_options, config: LoadedPollConfig) -> list[PollOptionSnapshot]:
+    return [
+        {
+            "index": index,
+            "persistent_id": _get_extra_field(poll_options[index], "persistent_id"),
+            "choice": choice.value,
+        }
+        for index, choice in config.option_to_choice.items()
+        if index < len(poll_options)
+    ]
+
+
+async def register_published_poll(
+    bot: Any, message: Any, *, poll_date: date, chat_id: int, closes_at: datetime, config: LoadedPollConfig,
+) -> PollResult:
+    try:
+        result = await PollsService.create_daily_poll(
+            poll_date=poll_date,
+            chat_id=chat_id,
+            message_id=message.message_id,
+            telegram_poll_id=message.poll.id,
+            closes_at=closes_at,
+            option_snapshot=poll_option_snapshot(message.poll.options, config),
+        )
+    except Exception as exc:
+        logger.error("poll publication could not be saved (%s)", type(exc).__name__)
+        # The commit may have reached PostgreSQL even when the client did not receive its reply.
+        try:
+            persisted = await PollsService.get_poll_by_telegram_id(message.poll.id)
+        except Exception:
+            return PollResult(success=False, error=PollError.POLL_PERSIST_FAILED)
+        if persisted:
+            return PollResult(success=True, poll_id=persisted["id"])
+        result = PollResult(success=False, error=PollError.POLL_PERSIST_FAILED)
+
+    if not result.success:
+        await _stop_telegram_poll_safe(bot, chat_id, message.message_id)
+    return result
+
+
+def poll_close_at(duration_seconds: int) -> datetime:
+    # Telegram uses whole Unix seconds and requires at least five seconds of lead time.
+    duration = min(max(duration_seconds, 6), 2628000)
+    return datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=duration)
+
+
+async def _resolve_choice_from_poll_answer(
+    poll_answer, option_snapshot: str | list[PollOptionSnapshot] | None = None,
+) -> tuple[AttendanceChoice | None, str]:
     persistent_ids = _get_extra_field(poll_answer, "option_persistent_ids") or []
+    if option_snapshot is not None:
+        options = json.loads(option_snapshot) if isinstance(option_snapshot, str) else option_snapshot
+        if persistent_ids:
+            for option in options:
+                if option["persistent_id"] in persistent_ids:
+                    return AttendanceChoice(option["choice"]), "poll_snapshot"
+            if any(option["persistent_id"] for option in options):
+                return None, "unknown_persistent_id"
+        for option in options:
+            if option["index"] in poll_answer.option_ids:
+                return AttendanceChoice(option["choice"]), "poll_snapshot"
+        return None, "unknown_option"
+
     cached_mapping = _POLL_PERSISTENT_TO_CHOICE.get(poll_answer.poll_id, {})
     for persistent_id in persistent_ids:
         choice = cached_mapping.get(str(persistent_id))
@@ -193,6 +257,12 @@ ABSENCE_EMOJI: dict[str, str] = {
     "SICK": "🤒",
     "LEAVE": "📴",
     "DAY_OFF": "📴",
+}
+
+_ABSENCE_LABELS = {
+    "VACATION": "Отпуск",
+    "SICK": "Больничный",
+    "LEAVE": "Отгул",
 }
 
 _DEPT_NAMES = {
@@ -230,7 +300,9 @@ def get_local_datetime() -> datetime:
 
 
 def format_time(dt: datetime) -> str:
-    """Format datetime as HH:MM."""
+    """Format datetime in the configured poll timezone as HH:MM."""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(get_tzinfo(get_poll_timezone()))
     return dt.strftime("%H:%M")
 
 
@@ -241,11 +313,10 @@ async def build_absence_message(poll_date: date) -> str | None:
     if not statuses:
         return None
 
-    displayable_kinds = {"VACATION", "SICK", "LEAVE"}
     by_kind: dict[str, list[tuple[str, date | None]]] = {}
     for status in statuses:
         kind = status.get("kind")
-        if kind not in displayable_kinds:
+        if kind not in _ABSENCE_LABELS:
             continue
         full_name = status.get("full_name", "Unknown")
         end_date = status.get("end_date")
@@ -255,67 +326,16 @@ async def build_absence_message(poll_date: date) -> str | None:
         return None
 
     lines = ["📌 Сегодня отсутствуют:", ""]
-    kind_labels = {
-        "VACATION": "Отпуск",
-        "SICK": "Больничный",
-        "LEAVE": "Отгул",
-    }
-
-    for kind in ("VACATION", "SICK", "LEAVE"):
+    for kind, label in _ABSENCE_LABELS.items():
         if kind not in by_kind:
             continue
         emoji = ABSENCE_EMOJI.get(kind, "")
-        label = kind_labels.get(kind, kind)
         lines.append(f"{emoji} {label}:")
         for full_name, end_date in sorted(by_kind[kind], key=lambda item: item[0]):
             if end_date:
                 lines.append(f"  • {full_name} — до {end_date.strftime('%d.%m.%Y')} включительно")
             else:
                 lines.append(f"  • {full_name}")
-        lines.append("")
-
-    return "\n".join(lines).rstrip()
-
-
-async def _build_absence_message_html(poll_date: date) -> str | None:
-    """Build HTML-safe absent users block for department list summaries."""
-    statuses = await DayStatusRepo.get_statuses_for_date(poll_date)
-
-    if not statuses:
-        return None
-
-    displayable_kinds = {"VACATION", "SICK", "LEAVE"}
-    by_kind: dict[str, list[tuple[str, date | None]]] = {}
-    for status in statuses:
-        kind = status.get("kind")
-        if kind not in displayable_kinds:
-            continue
-        full_name = str(status.get("full_name") or "Unknown")
-        end_date = status.get("end_date")
-        by_kind.setdefault(kind, []).append((full_name, end_date))
-
-    if not by_kind:
-        return None
-
-    lines = ["📌 <b>Сегодня отсутствуют</b>:", ""]
-    kind_labels = {
-        "VACATION": "Отпуск",
-        "SICK": "Больничный",
-        "LEAVE": "Отгул",
-    }
-
-    for kind in ("VACATION", "SICK", "LEAVE"):
-        if kind not in by_kind:
-            continue
-        emoji = ABSENCE_EMOJI.get(kind, "")
-        label = kind_labels.get(kind, kind)
-        lines.append(f"{emoji} <b>{label}</b>:")
-        for full_name, end_date in sorted(by_kind[kind], key=lambda item: item[0]):
-            escaped_name = _escape_html(full_name)
-            if end_date:
-                lines.append(f"• {escaped_name} — до {end_date.strftime('%d.%m.%Y')} включительно")
-            else:
-                lines.append(f"• {escaped_name}")
         lines.append("")
 
     return "\n".join(lines).rstrip()
@@ -356,39 +376,151 @@ def _format_non_respondent_for_group(user: dict[str, Any]) -> str | None:
     return name
 
 
-def _reply_parameters(message_id: int, poll_option_id: str | None = None, chat_id: int | None = None):
-    try:
-        from aiogram.types import ReplyParameters
-
-        return ReplyParameters(message_id=message_id, chat_id=chat_id, poll_option_id=poll_option_id)
-    except Exception:
-        return None
-
-
-def _is_reply_parameters_error(exc: Exception) -> bool:
-    error = str(exc).lower()
-    return "reply" in error or "poll_option_id" in error or "message to be replied" in error
+def poll_message_url(poll: dict[str, Any]) -> str | None:
+    chat_id = str(poll.get("chat_id"))
+    message_id = poll.get("message_id")
+    if chat_id.startswith("-100") and chat_id[4:].isdigit() and message_id:
+        return f"https://t.me/c/{chat_id[4:]}/{int(message_id)}"
+    return None
 
 
-async def _send_summary_message(
-    bot: Any,
-    *,
-    chat_id: int,
-    text: str,
-    reply_parameters: Any | None = None,
-) -> None:
-    try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="HTML",
-            reply_parameters=reply_parameters,
+def _bounded_names(names: list[str], budget: int) -> list[str]:
+    displayed = []
+    for name in sorted(names):
+        units = len(name.encode("utf-16-le")) // 2 + 1
+        if units > budget:
+            break
+        budget -= units
+        displayed.append(_escape_html(name))
+
+    omitted = len(names) - len(displayed)
+    if omitted:
+        displayed.append(f"И ещё {omitted}")
+    return displayed
+
+
+def _group_report_absences(poll_date: date, absence_statuses: list[dict[str, Any]]) -> dict[str, list[str]]:
+    absent: dict[str, list[str]] = {}
+    for status in absence_statuses:
+        kind = status.get("kind")
+        if kind not in _ABSENCE_LABELS:
+            continue
+        name = str(status.get("full_name") or "Без имени")
+        end_date = status.get("end_date")
+        if end_date and end_date > poll_date:
+            name += f" — до {end_date:%d.%m.%Y} включительно"
+        absent.setdefault(kind, []).append(name)
+    return absent
+
+
+def _render_daily_summary(
+    poll_date: date, by_choice: dict[str, list[str]], unanswered: list[str], poll_url: str | None,
+    *, absence_statuses: list[dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    responded = sum(len(names) for names in by_choice.values())
+    missed = len(unanswered)
+    expected = responded + missed
+    date_label = poll_date.strftime("%d.%m.%Y")
+    if expected:
+        totals = f"<b>{responded} из {expected}</b> отметились · <b>{responded / expected:.0%}</b> участия"
+    else:
+        totals = "Сегодня ответов не ожидалось"
+
+    rows = []
+    plain_rows = []
+    sections = []
+    for key, names in by_choice.items():
+        label = _escape_html("Удалённо" if key == AttendanceChoice.REMOTE else _CHOICE_LABELS[key])
+        count = len(names)
+        share = f"{count / responded:.0%}" if responded else "—"
+        rows.append(f'<tr><td>{label}</td><td align="right">{count}</td><td align="right">{share}</td></tr>')
+        plain_rows.append(f"{label} · <b>{count}</b>")
+        if names:
+            sections.append((label, names))
+
+    rich = [
+        "<h2>Явка ОЗКО</h2>",
+        f"<p><i>{date_label} · Итоги опроса</i></p>",
+        f"<p>{totals}</p>",
+    ]
+    plain = ["<b>Явка ОЗКО</b>", f"<i>{date_label} · Итоги опроса</i>", "", totals]
+    if missed:
+        missed_text = f"Не ответили: <b>{missed}</b>"
+        rich.append(f"<p>{missed_text}</p>")
+        plain.append(missed_text)
+    rich.append(
+        '<table bordered striped compact><tr><th>Вариант</th><th align="right">Чел.</th>'
+        '<th align="right">Доля</th></tr>' + "".join(rows) + "</table>"
+    )
+    plain.extend(["", *plain_rows])
+    if unanswered:
+        sections.append(("Не ответили", unanswered))
+
+    absent = _group_report_absences(poll_date, absence_statuses or [])
+
+    if sections or absent:
+        rich.extend(["<hr/>", "<h4>Списки участников</h4>"])
+        plain.extend(["", "<b>Списки участников</b>"])
+
+    # Allocate a separate budget to each section so a large office cannot hide the others.
+    for label, names in sections:
+        plain_names = _bounded_names(names, 650)
+        rich_names = _bounded_names(names, 5000)
+        items = "".join(f"<li>{name}</li>" for name in rich_names)
+        rich.append(f"<details><summary><b>{label}</b> · {len(names)}</summary><ul>{items}</ul></details>")
+        plain.append(f"<b>{label} · {len(names)}</b>")
+        plain.append("<blockquote expandable>" + "\n".join(plain_names) + "</blockquote>")
+
+    if absent:
+        absent_total = sum(len(names) for names in absent.values())
+        rich.append(f"<details><summary><b>Отсутствуют</b> · {absent_total}</summary>")
+        plain.append(f"<b>Отсутствуют · {absent_total}</b>")
+        plain_groups = []
+        for kind, label in _ABSENCE_LABELS.items():
+            names = absent.get(kind)
+            if not names:
+                continue
+            title = f"{label} · {len(names)}"
+            items = "".join(f"<li>{name}</li>" for name in _bounded_names(names, 5000 // len(absent)))
+            rich.append(f"<h5>{title}</h5><ul>{items}</ul>")
+            plain_groups.append(f"<b>{title}</b>\n" + "\n".join(_bounded_names(names, 650 // len(absent))))
+        rich.append("</details>")
+        plain.append("<blockquote expandable>" + "\n\n".join(plain_groups) + "</blockquote>")
+
+    if poll_url:
+        url = html.escape(poll_url, quote=True)
+        rich.append(
+            f'<tg-button-row align="left"><tg-button type="url" style="primary" url="{url}">'
+            'Открыть опрос</tg-button></tg-button-row>'
         )
-    except Exception as exc:
-        if not reply_parameters or not _is_reply_parameters_error(exc):
-            raise
-        logger.warning("poll_summary: retrying without reply_parameters after Telegram error: %s", exc)
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        plain.append(f'<a href="{url}">Открыть опрос</a>')
+    return "\n".join(plain), "\n".join(rich)
+
+
+async def _load_department_attendance(
+    poll: dict[str, Any], poll_date: date, department_id: int,
+) -> tuple[dict[str, list[str]], list[str]]:
+    poll_id = poll.get("id")
+    if poll.get("expected_users_snapshot_at") and poll_id:
+        rows = await PollsRepo.get_summary_attendance(poll_id, poll.get("telegram_poll_id"), department_id)
+    else:
+        marks = await AttendanceRepo.get_marks_for_date(poll_date, department_id=department_id)
+        marked_users = {mark["user_id"] for mark in marks if mark.get("user_id") is not None}
+        non_respondents = await PollsService.get_non_respondents(poll_id, department_id=department_id) if poll_id else []
+        rows = [*marks, *(
+            row for row in non_respondents if row.get("id") not in marked_users and not _is_no_tg_worker(row)
+        )]
+
+    by_choice: dict[str, list[str]] = {choice.value: [] for choice in AttendanceChoice}
+    unanswered = []
+    for row in rows:
+        name = str(row.get("full_name") or "Без имени")
+        choice = row.get("choice")
+        if choice in by_choice:
+            by_choice[choice].append(name)
+        elif not choice:
+            unanswered.append(name)
+    return by_choice, unanswered
 
 
 async def send_poll_close_summary(
@@ -398,138 +530,116 @@ async def send_poll_close_summary(
     delay_seconds: float = 0,
     department_id: int = OZKO_DEPARTMENT_ID,
 ) -> bool:
-    """Send poll close summary to POLL_SUMMARY_CHAT_ID on a best-effort basis."""
     summary_chat_id = get_poll_summary_chat_id()
     if not summary_chat_id or not poll:
         return False
-
     if delay_seconds > 0:
         await asyncio.sleep(delay_seconds)
 
-    poll_id = poll.get("id")
     poll_date = poll.get("poll_date") or get_local_date()
-    message_id = poll.get("message_id")
-    source_chat_id = poll.get("chat_id")
+    by_choice, unanswered = await _load_department_attendance(poll, poll_date, department_id)
+    absence_statuses = await DayStatusRepo.get_statuses_for_date(poll_date, department_id=department_id)
+    html_text, rich_html_text = _render_daily_summary(
+        poll_date, by_choice, unanswered, poll_message_url(poll), absence_statuses=absence_statuses,
+    )
+    state = await send_tracked_report(
+        bot,
+        f'poll_summary:{poll.get("telegram_poll_id") or poll.get("id") or poll_date}',
+        chat_id=summary_chat_id,
+        html_text=html_text,
+        rich_html_text=rich_html_text,
+    )
+    return state == "sent"
 
-    try:
-        marks = await AttendanceRepo.get_marks_for_date(
-            poll_date,
-            department_id=department_id,
-        )
-        non_respondents = (
-            await PollsService.get_non_respondents(
-                int(poll_id),
-                department_id=department_id,
-            )
-            if poll_id
-            else []
-        )
-        public_non_respondents = [nr for nr in non_respondents if not _is_no_tg_worker(nr)]
-    except Exception as exc:
-        logger.warning("poll_summary: failed to load data poll_id=%s: %s", poll_id, exc)
-        return False
 
-    by_choice: dict[str, list[str]] = {choice.value: [] for choice in AttendanceChoice}
-    for mark in marks:
-        choice = str(mark.get("choice"))
-        if choice in by_choice:
-            by_choice[choice].append(str(mark.get("full_name") or "Без имени"))
+@dataclass(frozen=True)
+class DepartmentAttendanceReport:
+    by_choice: dict[str, list[str]]
+    unanswered: list[str]
+    absent: dict[str, list[str]]
 
-    total_marks = sum(len(names) for names in by_choice.values())
-    text_lines = [
-        f"📊 Итоги опроса явки за <b>{poll_date.strftime('%d.%m.%Y')}</b> — ОЗКО",
-        f"Ответили: <b>{total_marks}</b>",
-        f"Не ответили: <b>{len(public_non_respondents)}</b>",
+    @property
+    def responded(self) -> int:
+        return sum(len(names) for names in self.by_choice.values())
+
+    @property
+    def expected(self) -> int:
+        return self.responded + len(self.unanswered)
+
+    @property
+    def absent_count(self) -> int:
+        return sum(len(names) for names in self.absent.values())
+
+
+def _render_department_lists_summary(
+    poll_date: date, ozko: DepartmentAttendanceReport, osb: DepartmentAttendanceReport,
+) -> tuple[str, str]:
+    departments = (("ОЗКО", ozko), ("ОСБ", osb))
+    count_rows = [
+        ("Ответили", ozko.responded, osb.responded),
+        ("Не ответили", len(ozko.unanswered), len(osb.unanswered)),
     ]
-    try:
-        await _send_summary_message(
-            bot,
-            chat_id=summary_chat_id,
-            text="\n".join(text_lines),
-            reply_parameters=_reply_parameters(message_id, chat_id=source_chat_id) if message_id else None,
-        )
-    except Exception as exc:
-        logger.warning("poll_summary: failed to send header poll_id=%s: %s", poll_id, exc)
-        return False
-
-    option_ids = {AttendanceChoice.EVOLUTION.value: "0", AttendanceChoice.CSKA.value: "1", AttendanceChoice.REMOTE.value: "2"}
     for choice in AttendanceChoice:
-        names = sorted(by_choice.get(choice.value, []))
-        if names:
-            body = "\n".join(f"• {_escape_html(name)}" for name in names)
-        else:
-            body = "—"
-        text = f"<b>{_CHOICE_LABELS.get(choice.value, choice.value)}</b>: {len(names)}\n{body}"
-        try:
-            await _send_summary_message(
-                bot,
-                chat_id=summary_chat_id,
-                text=text,
-                reply_parameters=_reply_parameters(message_id, option_ids[choice.value], source_chat_id)
-                if message_id
-                else None,
-            )
-        except Exception as exc:
-            logger.warning("poll_summary: failed to send choice=%s poll_id=%s: %s", choice.value, poll_id, exc)
+        label = "Удалённо" if choice == AttendanceChoice.REMOTE else _CHOICE_LABELS[choice.value]
+        count_rows.append((label, len(ozko.by_choice[choice.value]), len(osb.by_choice[choice.value])))
+    count_rows.append(("Отсутствуют", ozko.absent_count, osb.absent_count))
 
-    if public_non_respondents:
-        names = sorted(str(nr.get("full_name") or "Без имени") for nr in public_non_respondents)
-        text = "<b>Не ответили</b>:\n" + "\n".join(f"• {_escape_html(name)}" for name in names)
-        try:
-            await _send_summary_message(bot, chat_id=summary_chat_id, text=text)
-        except Exception as exc:
-            logger.warning("poll_summary: failed to send non-respondents poll_id=%s: %s", poll_id, exc)
-
-    logger.info("poll_summary: sent poll_id=%s chat_id=%s", poll_id, summary_chat_id)
-    return True
-
-
-async def _build_department_list_block(
-    poll_id: int | None,
-    poll_date: date,
-    *,
-    department_id: int,
-    department_name: str,
-) -> str:
-    marks = await AttendanceRepo.get_marks_for_date(
-        poll_date,
-        department_id=department_id,
+    total = ozko.responded + osb.responded
+    expected = ozko.expected + osb.expected
+    participation = (
+        f"<b>{total} из {expected}</b> отметились · <b>{total / expected:.0%}</b> участия"
+        if expected else "Сегодня ответов не ожидалось"
     )
-    non_respondents = (
-        await PollsService.get_non_respondents(
-            int(poll_id),
-            department_id=department_id,
+    rich = [
+        "<h2>Явка по отделам</h2>",
+        f"<p><i>{poll_date:%d.%m.%Y} · ОЗКО и ОСБ</i></p>",
+        f"<p>{participation}</p>",
+        '<table bordered striped compact><tr><th>Статус</th><th>ОЗКО</th><th>ОСБ</th></tr>',
+    ]
+    plain = ["<b>Явка по отделам</b>", f"<i>{poll_date:%d.%m.%Y} · ОЗКО и ОСБ</i>", participation, ""]
+    for index, (label, first, second) in enumerate(count_rows):
+        label = _escape_html(label)
+        cells = (label, str(first), str(second))
+        if index == 0:
+            cells = tuple(f"<b>{value}</b>" for value in cells)
+        left, middle, right = cells
+        rich.append(f'<tr><td>{left}</td><td align="right">{middle}</td><td align="right">{right}</td></tr>')
+        plain.append(f"{label} · ОЗКО <b>{first}</b> / ОСБ <b>{second}</b>")
+    rich.extend(["</table>", "<hr/>"])
+
+    for label, department in departments:
+        rich.append(f"<details><summary><b>{label}</b> · {department.responded} из {department.expected} отметились</summary>")
+        plain.append(f"\n<b>{label}</b>")
+        sections = [
+            ("Удалённо" if choice == AttendanceChoice.REMOTE else _CHOICE_LABELS[choice.value],
+             department.by_choice[choice.value])
+            for choice in AttendanceChoice if department.by_choice[choice.value]
+        ]
+        if department.unanswered:
+            sections.append(("Не ответили", department.unanswered))
+        absence_start = len(sections)
+        sections.extend(
+            (title, department.absent[kind]) for kind, title in _ABSENCE_LABELS.items()
+            if kind in department.absent
         )
-        if poll_id
-        else []
-    )
-    public_non_respondents = [nr for nr in non_respondents if not _is_no_tg_worker(nr)]
-
-    by_choice: dict[str, list[str]] = {choice.value: [] for choice in AttendanceChoice}
-    for mark in marks:
-        choice = str(mark.get("choice"))
-        if choice in by_choice:
-            by_choice[choice].append(str(mark.get("full_name") or "Без имени"))
-
-    lines = [f"Список {department_name} на <b>{poll_date.strftime('%d.%m.%Y')}</b>"]
-    for choice in AttendanceChoice:
-        names = sorted(by_choice.get(choice.value, []))
-        lines.append("")
-        lines.append(f"<b>{_CHOICE_LABELS.get(choice.value, choice.value)}</b>: {len(names)}")
-        if names:
-            lines.extend(f"• {_escape_html(name)}" for name in names)
+        plain_details = []
+        plain_budget = 1400 // max(1, len(sections))
+        rich_budget = 8000 // max(1, len(sections))
+        for index, (section_label, names) in enumerate(sections):
+            if index == absence_start:
+                rich.append(f"<h4>Отсутствуют · {department.absent_count}</h4>")
+                plain_details.append(f"<b>Отсутствуют · {department.absent_count}</b>")
+            title = f"{_escape_html(section_label)} · {len(names)}"
+            items = "".join(f"<li>{name}</li>" for name in _bounded_names(names, rich_budget))
+            rich.append(f"<h5>{title}</h5><ul>{items}</ul>")
+            plain_details.extend([f"<b>{title}</b>", *_bounded_names(names, plain_budget)])
+        if plain_details:
+            plain.append("<blockquote expandable>" + "\n".join(plain_details) + "</blockquote>")
         else:
-            lines.append("—")
+            rich.append("<p>Нет отметок для списка.</p>")
+        rich.append("</details>")
 
-    names = sorted(str(nr.get("full_name") or "Без имени") for nr in public_non_respondents)
-    lines.append("")
-    lines.append(f"<b>Не ответили</b>: {len(names)}")
-    if names:
-        lines.extend(f"• {_escape_html(name)}" for name in names)
-    else:
-        lines.append("—")
-
-    return "\n".join(lines)
+    return "\n".join(plain), "\n".join(rich)
 
 
 async def send_department_lists_summary(
@@ -538,7 +648,7 @@ async def send_department_lists_summary(
     *,
     delay_seconds: float = 0,
 ) -> bool:
-    """Send combined OZKO/OSB attendance lists to DEPARTMENT_LISTS_CHAT_ID."""
+    """Send the combined attendance report to DEPARTMENT_LISTS_CHAT_ID."""
     chat_id = get_department_lists_chat_id()
     if not chat_id or not poll:
         return False
@@ -546,38 +656,23 @@ async def send_department_lists_summary(
     if delay_seconds > 0:
         await asyncio.sleep(delay_seconds)
 
-    poll_id = poll.get("id")
     poll_date = poll.get("poll_date") or get_local_date()
+    reports = []
+    for department_id in (OZKO_DEPARTMENT_ID, OSB_DEPARTMENT_ID):
+        by_choice, unanswered = await _load_department_attendance(poll, poll_date, department_id)
+        statuses = await DayStatusRepo.get_statuses_for_date(poll_date, department_id=department_id)
+        reports.append(DepartmentAttendanceReport(by_choice, unanswered, _group_report_absences(poll_date, statuses)))
 
-    try:
-        ozko_block = await _build_department_list_block(
-            int(poll_id) if poll_id else None,
-            poll_date,
-            department_id=OZKO_DEPARTMENT_ID,
-            department_name="ОЗКО",
-        )
-        osb_block = await _build_department_list_block(
-            int(poll_id) if poll_id else None,
-            poll_date,
-            department_id=OSB_DEPARTMENT_ID,
-            department_name="ОСБ",
-        )
-        absence_block = await _build_absence_message_html(poll_date)
-        text = f"{ozko_block}\n\n{osb_block}"
-        if absence_block:
-            text = f"{text}\n\n{absence_block}"
-    except Exception as exc:
-        logger.warning("department_lists: failed to build poll_id=%s: %s", poll_id, exc)
-        return False
+    plain, rich = _render_department_lists_summary(poll_date, *reports)
+    state = await send_tracked_report(
+        bot,
+        f'department_lists:{poll.get("telegram_poll_id") or poll.get("id") or poll_date}',
+        chat_id=chat_id,
+        html_text=plain,
+        rich_html_text=rich,
+    )
+    return state == "sent"
 
-    try:
-        await _send_summary_message(bot, chat_id=chat_id, text=text)
-    except Exception as exc:
-        logger.warning("department_lists: failed to send poll_id=%s chat_id=%s: %s", poll_id, chat_id, exc)
-        return False
-
-    logger.info("department_lists: sent poll_id=%s chat_id=%s", poll_id, chat_id)
-    return True
 
 
 def _is_poll_already_closed_error(exc: Exception) -> bool:

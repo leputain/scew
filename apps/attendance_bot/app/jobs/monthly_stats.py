@@ -16,7 +16,7 @@ from core.screw_core.repos.events_repo import EventsRepo
 from core.screw_core.repos.monthly_stats_repo import MonthlyStatsRepo
 from core.screw_core.services.notify import get_violations_ozko_chat_id
 from core.screw_core.services.permissions import OZKO_DEPARTMENT_ID
-from core.screw_core.services.telegram_delivery import send_system_message
+from core.screw_core.services.telegram_report_delivery import send_tracked_report
 from core.screw_core.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -378,13 +378,27 @@ async def send_monthly_stats_to_violations_chat(
     if not report:
         return False, f"нет данных за {year}-{month:02d}", chat_id
 
-    delivery = await send_system_message(
+    sections = report.html.split("\n\n")
+    rich_parts = []
+    for section in sections:
+        details = section.replace("<blockquote expandable>", "").replace("</blockquote>", "").replace("\n", "<br>")
+        if section.startswith(("⚡", "🎯", "✅")):
+            heading, _, body = details.partition("<br>")
+            inner = f"<p>{body}</p>" if body else ""
+            rich_parts.append(f"<details><summary>{heading}</summary>{inner}</details>" if inner else f"<p>{heading}</p>")
+        else:
+            rich_parts.append(f"<p>{details}</p>")
+    state = await send_tracked_report(
         bot,
+        f"monthly_stats:{year:04d}-{month:02d}:OZKO",
         chat_id=chat_id,
         html_text=report.html,
+        rich_html_text="".join(rich_parts),
         reaction_emoji="🏆",
-        delivery_mode="html",
     )
+    if state != "sent":
+        reason = "доставка не подтверждена" if state == "uncertain" else "Telegram отклонил отчёт"
+        return False, reason, chat_id
 
     if automatic:
         try:
@@ -398,7 +412,6 @@ async def send_monthly_stats_to_violations_chat(
                     "response_count": report.response_count,
                     "expected_count": report.expected_count,
                     "approximate": report.is_approximate,
-                    "delivery_method": delivery.method,
                 },
                 notify_channel=NotifyChannel.NONE,
             )

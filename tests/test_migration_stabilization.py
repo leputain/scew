@@ -1389,6 +1389,15 @@ async def test_poll_close_summary_sends_only_ozko_data(monkeypatch: pytest.Monke
             {"full_name": "ОСБ Неответивший", "role": "employee", "telegram_id": 456},
         ]
 
+    async def fake_get_statuses_for_date(status_date, *, department_id):
+        assert status_date == date(2026, 5, 15)
+        assert department_id == OZKO_DEPARTMENT_ID
+        return [
+            {"kind": "VACATION", "full_name": "Фамилия & Имя", "end_date": date(2026, 5, 20)},
+            {"kind": "SICK", "full_name": "ОЗКО Больничный", "end_date": date(2026, 5, 15)},
+            {"kind": "DAY_OFF", "full_name": "ОЗКО Выходной"},
+        ]
+
     class FakeBot:
         def __init__(self) -> None:
             self.messages: list[str] = []
@@ -1399,7 +1408,21 @@ async def test_poll_close_summary_sends_only_ozko_data(monkeypatch: pytest.Monke
     monkeypatch.setattr(poll_runtime, "get_poll_summary_chat_id", lambda: -100123)
     monkeypatch.setattr(poll_runtime.AttendanceRepo, "get_marks_for_date", fake_get_marks_for_date)
     monkeypatch.setattr(poll_runtime.PollsService, "get_non_respondents", fake_get_non_respondents)
+    monkeypatch.setattr(poll_runtime.DayStatusRepo, "get_statuses_for_date", fake_get_statuses_for_date)
 
+    async def deliver(bot, key, **kwargs):
+        assert key == "poll_summary:42"
+        assert "<table bordered striped compact>" in kwargs["rich_html_text"]
+        assert '<td align="right">50%</td>' in kwargs["rich_html_text"]
+        rich = kwargs["rich_html_text"]
+        assert "<details><summary><b>Отсутствуют</b> · 2</summary>" in rich
+        assert "<h5>Отпуск · 1</h5><ul><li>Фамилия &amp; Имя — до 20.05.2026 включительно</li></ul>" in rich
+        assert "<h5>Больничный · 1</h5><ul><li>ОЗКО Больничный</li></ul>" in rich
+        assert "ОЗКО Выходной" not in rich
+        await bot.send_message(text=kwargs["html_text"])
+        return "sent"
+
+    monkeypatch.setattr(poll_runtime, "send_tracked_report", deliver)
     bot = FakeBot()
     result = await poll_runtime.send_poll_close_summary(
         bot,
@@ -1416,12 +1439,16 @@ async def test_poll_close_summary_sends_only_ozko_data(monkeypatch: pytest.Monke
     assert result is True
     assert captured["marks_department_id"] == OZKO_DEPARTMENT_ID
     assert captured["non_respondents_department_id"] == OZKO_DEPARTMENT_ID
-    assert "Итоги опроса явки за <b>15.05.2026</b> — ОЗКО" in joined
-    assert "Ответили: <b>2</b>" in joined
+    assert "Явка ОЗКО" in joined
+    assert "15.05.2026 · Итоги опроса" in joined
+    assert len(bot.messages) == 1
+    assert "<b>2 из 3</b> отметились · <b>67%</b> участия" in joined
     assert "Не ответили: <b>1</b>" in joined
     assert "ОЗКО Иванов" in joined
     assert "ОЗКО Петров" in joined
     assert "ОЗКО Неответивший" in joined
+    assert "Отсутствуют · 2" in joined
+    assert "ОЗКО Выходной" not in joined
     assert "ОСБ Сидоров" not in joined
     assert "ОСБ Неответивший" not in joined
 
@@ -1430,78 +1457,62 @@ async def test_poll_close_summary_sends_only_ozko_data(monkeypatch: pytest.Monke
 async def test_department_lists_summary_sends_ozko_then_osb(monkeypatch: pytest.MonkeyPatch) -> None:
     from apps.attendance_bot.app.services import poll_runtime
     from core.screw_core.config.departments import OSB_DEPARTMENT_ID, OZKO_DEPARTMENT_ID
-    from core.screw_core.models.enums import AttendanceChoice
 
-    async def fake_get_marks_for_date(mark_date, department_id=None):
-        assert mark_date == date(2026, 5, 15)
-        if department_id == OZKO_DEPARTMENT_ID:
-            return [{"choice": AttendanceChoice.EVOLUTION.value, "full_name": "ОЗКО Иванов"}]
-        if department_id == OSB_DEPARTMENT_ID:
-            return [{"choice": AttendanceChoice.CSKA.value, "full_name": "ОСБ Сидоров"}]
-        raise AssertionError(f"unexpected department_id={department_id}")
+    day = date(2026, 5, 15)
+    sent = []
 
-    async def fake_get_non_respondents(poll_id, department_id=None):
-        assert poll_id == 42
-        if department_id == OZKO_DEPARTMENT_ID:
-            return [{"full_name": "ОЗКО Неответивший", "role": "employee", "telegram_id": 123}]
-        if department_id == OSB_DEPARTMENT_ID:
-            return [{"full_name": "ОСБ Неответивший", "role": "employee", "telegram_id": 456}]
-        raise AssertionError(f"unexpected department_id={department_id}")
+    async def get_summary(poll_id, telegram_poll_id, department_id):
+        assert poll_id == 42 and telegram_poll_id == "test-poll"
+        return {
+            OZKO_DEPARTMENT_ID: [{"choice": "EVOLUTION", "full_name": "ОЗКО Иванов"}],
+            OSB_DEPARTMENT_ID: [
+                {"choice": "CSKA", "full_name": "ОСБ Сидоров"},
+                {"choice": None, "full_name": "ОСБ Неответивший"},
+            ],
+        }[department_id]
 
-    async def fake_get_statuses_for_date(status_date):
-        assert status_date == date(2026, 5, 15)
-        return [
-            {
-                "kind": "VACATION",
-                "full_name": "ОЗКО Отпуск",
-                "end_date": date(2026, 5, 20),
-            },
-            {
-                "kind": "SICK",
-                "full_name": "ОСБ Больничный",
-                "end_date": None,
-            },
-            {
-                "kind": "DAY_OFF",
-                "full_name": "Не должен попасть",
-                "end_date": None,
-            },
-        ]
+    async def get_statuses(status_date, *, department_id):
+        assert status_date == day
+        return {
+            OZKO_DEPARTMENT_ID: [{"kind": "VACATION", "full_name": "ОЗКО Отпуск", "end_date": date(2026, 5, 20)}],
+            OSB_DEPARTMENT_ID: [
+                {"kind": "SICK", "full_name": "ОСБ Больничный"},
+                {"kind": "DAY_OFF", "full_name": "Не должен попасть"},
+            ],
+        }[department_id]
 
-    class FakeBot:
-        def __init__(self) -> None:
-            self.messages: list[str] = []
-
-        async def send_message(self, **kwargs):
-            self.messages.append(kwargs["text"])
+    async def deliver(bot, key, **kwargs):
+        assert key == "department_lists:test-poll"
+        assert kwargs["chat_id"] == -100555
+        sent.append(kwargs)
+        return "sent"
 
     monkeypatch.setattr(poll_runtime, "get_department_lists_chat_id", lambda: -100555)
-    monkeypatch.setattr(poll_runtime.AttendanceRepo, "get_marks_for_date", fake_get_marks_for_date)
-    monkeypatch.setattr(poll_runtime.PollsService, "get_non_respondents", fake_get_non_respondents)
-    monkeypatch.setattr(poll_runtime.DayStatusRepo, "get_statuses_for_date", fake_get_statuses_for_date)
+    monkeypatch.setattr(poll_runtime.PollsRepo, "get_summary_attendance", get_summary)
+    monkeypatch.setattr(poll_runtime.DayStatusRepo, "get_statuses_for_date", get_statuses)
+    monkeypatch.setattr(poll_runtime, "send_tracked_report", deliver)
 
-    bot = FakeBot()
     result = await poll_runtime.send_department_lists_summary(
-        bot,
-        {
-            "id": 42,
-            "poll_date": date(2026, 5, 15),
-        },
+        object(), {"id": 42, "poll_date": day, "telegram_poll_id": "test-poll", "expected_users_snapshot_at": day},
     )
 
     assert result is True
-    assert len(bot.messages) == 1
-    text = bot.messages[0]
-    assert text.startswith("Список ОЗКО на <b>15.05.2026</b>")
-    assert text.index("Список ОЗКО") < text.index("Список ОСБ")
-    assert "ОЗКО Иванов" in text
-    assert "ОЗКО Неответивший" in text
-    assert "ОСБ Сидоров" in text
-    assert "ОСБ Неответивший" in text
-    assert text.index("Список ОСБ") < text.index("Сегодня отсутствуют")
-    assert "ОЗКО Отпуск — до 20.05.2026 включительно" in text
-    assert "ОСБ Больничный" in text
-    assert "Не должен попасть" not in text
+    assert len(sent) == 1
+    rich = sent[0]["rich_html_text"]
+    plain = sent[0]["html_text"]
+    assert rich.count("<table bordered striped compact>") == 1
+    assert "<b>2 из 3</b> отметились · <b>67%</b> участия" in rich
+    ozko, osb = rich.split("<details>")[1:]
+    assert ozko.startswith("<summary><b>ОЗКО</b> · 1 из 1 отметились")
+    assert "ОЗКО Иванов" in ozko
+    assert "ОЗКО Отпуск — до 20.05.2026 включительно" in ozko
+    assert "ОСБ" not in ozko
+    assert osb.startswith("<summary><b>ОСБ</b> · 1 из 2 отметились")
+    assert "<h5>Не ответили · 1</h5><ul><li>ОСБ Неответивший</li></ul>" in osb
+    assert "ОСБ Сидоров" in osb and "ОСБ Больничный" in osb
+    assert "ОЗКО" not in osb and "Не должен попасть" not in osb
+    assert plain.count("<blockquote expandable>") == 2
+    assert "ОЗКО Отпуск" in plain and "ОСБ Больничный" in plain
 
 
 @pytest.mark.asyncio
@@ -1910,6 +1921,7 @@ def test_aiogram_dispatcher_smoke_builds_with_memory_storage() -> None:
     assert dp.storage.__class__.__name__ == "MemoryStorage"
     assert [router.name for router in dp.sub_routers] == [
         "attendance_start",
+        "attendance_week_widget",
         "attendance_poll",
         "attendance_reports",
         "attendance_admin",

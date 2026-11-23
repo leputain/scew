@@ -382,6 +382,7 @@ def user_panel_keyboard(
     *,
     is_privileged: bool = False,
     is_ozko: bool = False,
+    show_week_widget: bool = False,
 ) -> InlineKeyboardMarkup:
     """
     Клавиатура панели пользователя ("Мой кабинет").
@@ -410,6 +411,9 @@ def user_panel_keyboard(
             InlineKeyboardButton(text="📈 Моя статистика", callback_data="user:my_stats"),
         ])
 
+    if show_week_widget:
+        rows.append([InlineKeyboardButton(text="Моя неделя", callback_data="user:week_widget")])
+
     rows.append([InlineKeyboardButton(text="ℹ️ Помощь", callback_data="nav:help:user")])
 
     # Правило D: навигация только для MANAGER/ADMIN
@@ -418,7 +422,9 @@ def user_panel_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def user_status_navigation_keyboard(*, is_privileged: bool = False) -> InlineKeyboardMarkup:
+def user_status_navigation_keyboard(
+    *, is_privileged: bool = False, poll_url: str | None = None,
+) -> InlineKeyboardMarkup:
     """
     Клавиатура навигации для экрана "Сегодня".
 
@@ -435,6 +441,8 @@ def user_status_navigation_keyboard(*, is_privileged: bool = False) -> InlineKey
         ],
     ]
 
+    if poll_url:
+        rows.insert(0, [InlineKeyboardButton(text="Перейти к опросу", url=poll_url)])
     rows.extend(build_user_nav_footer(back_target="user", is_privileged=is_privileged))
 
     return InlineKeyboardMarkup(inline_keyboard=rows)

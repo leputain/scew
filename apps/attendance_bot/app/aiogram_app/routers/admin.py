@@ -41,6 +41,7 @@ from apps.attendance_bot.app.utils.revoked_access import send_revoked_notice_if_
 from core.screw_core.models.enums import UserStatus, WorkMode
 from core.screw_core.repos.registration_repo import RegistrationRepo
 from core.screw_core.repos.users_repo import UsersRepo
+from core.screw_core.services.telegram_report_delivery import count_unresolved_report_deliveries
 from core.screw_core.services.health_status import (
     SchedulerHealth,
     SchedulerJobHealth,
@@ -293,7 +294,15 @@ async def cmd_health(message: Message) -> None:
         heartbeat_status=get_heartbeat_status(),
         telegram_status=get_telegram_health_status(),
     )
-    await message.answer(format_health_status(snapshot), parse_mode="HTML")
+    text = format_health_status(snapshot)
+    try:
+        unresolved = await count_unresolved_report_deliveries()
+    except Exception:
+        logger.debug("health: report delivery state unavailable")
+    else:
+        if unresolved:
+            text += f"\nОтчёты с неподтверждённой доставкой: <b>{unresolved}</b>"
+    await message.answer(text, parse_mode="HTML")
 
     result = "ok" if is_health_ok(snapshot) else "error"
     logger.info("AIROGRAM_HEALTH_CHECK user_id=%s result=%s", message.from_user.id, result)

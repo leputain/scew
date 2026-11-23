@@ -54,6 +54,9 @@ def _update_actor_and_chat(event: Update) -> tuple[Any | None, int | None, str |
             chat_id = event.callback_query.message.chat.id
             chat_type = event.callback_query.message.chat.type
         return event.callback_query.from_user, chat_id, chat_type, None
+    if event.widget_query:
+        chat = event.widget_query.chat
+        return event.widget_query.from_user, chat.id if chat else None, chat.type if chat else None, None
     if event.poll_answer:
         return event.poll_answer.user, None, None, None
     if event.message_reaction:
