@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.methods import SendRichMessage, SendWidget
-from aiogram.types import InputRichMessage, WidgetQueryTypeData
+from aiogram.types import Chat, InputRichMessage, Message, WidgetQueryTypeData
 
 from apps.attendance_bot.app.aiogram_app.routers import week_widget
 from apps.attendance_bot.app.services import poll_runtime
@@ -73,41 +73,93 @@ async def test_week_widget_edits_only_the_callers_private_card(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_widget_rejection_opens_three_expandable_weeks(monkeypatch):
+@pytest.mark.parametrize("entry, pilot_ids, native_mode, widget_calls", [
+    ("user:calendar", "", "0", 0),
+    ("user:calendar", "123", "1", 0),
+    ("user:week_widget", "123", "1", 1),
+])
+async def test_personal_week_navigation_uses_original_private_message(
+    monkeypatch, entry, pilot_ids, native_mode, widget_calls,
+):
     import json
+    from datetime import datetime, timedelta, timezone
 
-    monkeypatch.setenv("ATTENDANCE_WEEK_WIDGET_PILOT_IDS", "123")
-    monkeypatch.setenv("TELEGRAM_RICH_MESSAGES_ENABLED", "1")
-    monkeypatch.setattr(week_widget, "get_local_date", lambda: date(2026, 11, 23))
+    monkeypatch.setenv("ATTENDANCE_WEEK_WIDGET_PILOT_IDS", pilot_ids)
+    monkeypatch.setenv("ATTENDANCE_NATIVE_WEEK_WIDGET_ENABLED", native_mode)
+    today = date(2026, 11, 23)
+    monkeypatch.setattr(week_widget, "get_local_date", lambda: today)
 
     async def week_data(user_id, start):
         assert user_id == 1
-        return json.dumps({"title": start.isoformat(), "days": [["23.11", "<Office>"]]})
+        return json.dumps({
+            "title": start.isoformat(),
+            "days": [[start.strftime("%d.%m"), "<Office>"]],
+            "current": today.isoformat(),
+            "previous": (start - timedelta(days=7)).isoformat(),
+            "next": (start + timedelta(days=7)).isoformat(),
+        })
 
     monkeypatch.setattr(week_widget, "_week_data", week_data)
+    edit_text = AsyncMock()
+    monkeypatch.setattr(Message, "edit_text", edit_text)
     callback = SimpleNamespace(
-        message=SimpleNamespace(chat=SimpleNamespace(id=123, type="private")),
+        data=entry,
+        message=Message(message_id=7, date=datetime.now(timezone.utc), chat=Chat(id=123, type="private")),
         from_user=SimpleNamespace(id=123),
         answer=AsyncMock(),
     )
-    bot = SimpleNamespace(
-        send_widget=AsyncMock(side_effect=TelegramBadRequest(
-            method=SendWidget(chat_id=123, html="<p>Widget</p>"),
-            message="INPUT_MEDIA_WIDGET_NOT_ALLOWED",
-        )),
-        send_rich_message=AsyncMock(return_value={"message_id": 10}),
-        send_message=AsyncMock(),
-    )
+    bot = SimpleNamespace(send_widget=AsyncMock(side_effect=TelegramBadRequest(
+        method=SendWidget(chat_id=123, html="<p>Widget</p>"),
+        message="INPUT_MEDIA_WIDGET_NOT_ALLOWED",
+    )))
 
     await week_widget.open_week_widget(callback, bot, {"id": 1})
+    assert bot.send_widget.await_count == widget_calls
+    edit_text.assert_awaited_once()
+    args = edit_text.await_args
+    assert "Пн, 23.11 · сегодня" in args.args[0]
+    assert "&lt;Office&gt;" in args.args[0]
+    rows = args.kwargs["reply_markup"].inline_keyboard
+    assert [button.callback_data for button in rows[0]] == ["nav:ignore", "user:month", "user:my_statuses"]
+    back = rows[1][0]
+    assert back.callback_data == "user:week:2026-11-16"
+    assert rows[2][0].style == "primary"
+    assert rows[-1][0].callback_data == "panel:user"
+    assert (rows[-2][0].callback_data == "user:week_widget") == (native_mode == "1")
 
-    bot.send_rich_message.assert_awaited_once()
-    params = bot.send_rich_message.await_args.kwargs
-    assert params["chat_id"] == 123 and params["protect_content"]
-    html = params["rich_message"].html
-    assert html.count("<details") == 3
-    assert "<details open><summary>2026-11-23</summary>" in html
-    assert "<details><summary>2026-11-16</summary>" in html
-    assert "<details><summary>2026-11-09</summary>" in html
-    assert "&lt;Office&gt;" in html
-    bot.send_message.assert_not_awaited()
+    callback.data = back.callback_data
+    await week_widget.open_week_widget(callback, bot, {"id": 1})
+    assert "Пн, 16.11" in edit_text.await_args.args[0]
+    assert edit_text.await_count == 2
+    assert bot.send_widget.await_count == widget_calls
+
+    callback.message = callback.message.model_copy(update={"chat": Chat(id=456, type="private")})
+    await week_widget.open_week_widget(callback, bot, {"id": 1})
+    assert edit_text.await_count == 2
+
+
+def test_personal_menu_highlights_absence_and_keeps_voting_in_the_group():
+    from apps.attendance_bot.app.aiogram_app.keyboards import to_aiogram_markup
+    from apps.attendance_bot.app.ui.keyboards_neutral import (
+        my_statuses_keyboard,
+        user_month_navigation_keyboard,
+        user_panel_keyboard,
+        user_status_navigation_keyboard,
+    )
+
+    markup = to_aiogram_markup(user_panel_keyboard(is_ozko=True))
+    rows = markup.inline_keyboard
+    assert [button.callback_data for button in rows[0]] == ["user:today", "user:calendar"]
+    assert rows[1][0].callback_data == "status:create"
+    assert rows[1][0].style == "primary"
+    assert [button.callback_data for button in rows[2]] == ["user:who_in_office", "user:my_stats"]
+    assert rows[-2][0].callback_data == "nav:help:user"
+    today = user_status_navigation_keyboard().inline_keyboard
+    assert all(button.url is None for row in today for button in row)
+    assert today[1][1].callback_data == "user:calendar"
+    month = user_month_navigation_keyboard(2026, 11).inline_keyboard
+    assert [button.callback_data for button in month[0]] == ["user:calendar", "nav:ignore", "user:my_statuses"]
+    absences = my_statuses_keyboard([]).inline_keyboard
+    assert [button.callback_data for button in absences[0]] == ["user:calendar", "user:month", "nav:ignore"]
+    assert absences[1][0].callback_data == "status:create"
+    assert absences[1][0].style == "primary"

@@ -10,9 +10,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from apps.attendance_bot.app.aiogram_app.keyboards import to_aiogram_markup
+from apps.attendance_bot.app.aiogram_app.routers.start import edit_user_panel
 from apps.attendance_bot.app.ui.keyboards_neutral import (
-    MY_STATUSES_TITLE,
-    USER_PANEL_TITLE,
+    USER_CALENDAR_TITLE,
     calendar_keyboard,
     my_statuses_keyboard,
     status_cancel_keyboard,
@@ -22,7 +22,6 @@ from apps.attendance_bot.app.ui.keyboards_neutral import (
     status_skip_comment_keyboard,
     status_type_keyboard,
     user_back_keyboard,
-    user_panel_keyboard,
 )
 from apps.attendance_bot.app.utils.permissions import get_permissions
 from apps.attendance_bot.app.utils.private_chat_guard import MSG_PRIVATE_ONLY
@@ -135,15 +134,15 @@ async def _render_my_statuses(callback: CallbackQuery, user_id: int, page: int =
 
     if statuses:
         text = (
-            f"<b>{MY_STATUSES_TITLE}</b>\n\n"
+            f"<b>{USER_CALENDAR_TITLE} · Отсутствия</b>\n\n"
             f"До конца года ({today.strftime('%d.%m')} — {end_date.strftime('%d.%m')}):\n\n"
             "Нажмите на статус для просмотра или отмены."
         )
     else:
         text = (
-            f"<b>{MY_STATUSES_TITLE}</b>\n\n"
+            f"<b>{USER_CALENDAR_TITLE} · Отсутствия</b>\n\n"
             "У вас нет запланированных отсутствий.\n\n"
-            "Нажмите «➕ Сообщить об отсутствии» чтобы\n"
+            "Нажмите «➕ Сообщить об отсутствии», чтобы\n"
             "оформить отпуск, больничный или отгул."
         )
 
@@ -549,15 +548,10 @@ async def callback_status_confirm(callback: CallbackQuery, state: FSMContext) ->
 
 @router.callback_query(F.data == "status:cancel")
 async def callback_status_cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    if not callback.from_user:
+    if not callback.from_user or await _reject_if_group_chat(callback):
         return
     await state.clear()
-    perms = await get_permissions(callback.from_user.id)
-    await _edit(
-        callback,
-        USER_PANEL_TITLE,
-        user_panel_keyboard(is_privileged=perms.is_manager or perms.is_admin),
-    )
+    await edit_user_panel(callback)
     await callback.answer("Создание отменено.")
 
 

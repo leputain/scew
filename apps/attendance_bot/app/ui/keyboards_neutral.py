@@ -5,7 +5,7 @@ Inline и Reply клавиатуры для взаимодействия с по
 """
 
 from datetime import date as date_type
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 from apps.attendance_bot.app.ui.keyboard_spec import (
     KeyboardButtonSpec as InlineKeyboardButton,
@@ -23,8 +23,10 @@ from core.screw_core.models.enums import AttendanceChoice, WorkMode
 USER_PANEL_EMOJI = "🗂"
 USER_PANEL_TITLE = f"{USER_PANEL_EMOJI} Мой кабинет"
 
-# Название раздела "Мои статусы" → "Мой календарь"
-MY_STATUSES_TITLE = "📆 Мой календарь"
+USER_CALENDAR_TITLE = "📆 Мой календарь"
+REPORT_ABSENCE_BUTTON = InlineKeyboardButton(
+    text="➕ Сообщить об отсутствии", callback_data="status:create", style="primary",
+)
 
 # Названия месяцев на русском (индекс 0 не используется)
 MONTH_NAMES_RU = [
@@ -382,7 +384,6 @@ def user_panel_keyboard(
     *,
     is_privileged: bool = False,
     is_ozko: bool = False,
-    show_week_widget: bool = False,
 ) -> InlineKeyboardMarkup:
     """
     Клавиатура панели пользователя ("Мой кабинет").
@@ -394,14 +395,9 @@ def user_panel_keyboard(
     rows = [
         [
             InlineKeyboardButton(text="📅 Сегодня", callback_data="user:today"),
-            InlineKeyboardButton(text="🗓 Месяц", callback_data="user:month"),
+            InlineKeyboardButton(text=USER_CALENDAR_TITLE, callback_data="user:calendar"),
         ],
-        [
-            InlineKeyboardButton(text=MY_STATUSES_TITLE, callback_data="user:my_statuses"),
-        ],
-        [
-            InlineKeyboardButton(text="➕ Сообщить об отсутствии", callback_data="status:create"),
-        ],
+        [REPORT_ABSENCE_BUTTON],
     ]
 
     # "Кто в офисе" и "Моя статистика" — только для ОЗКО
@@ -410,9 +406,6 @@ def user_panel_keyboard(
             InlineKeyboardButton(text="🏢 Кто в офисе", callback_data="user:who_in_office"),
             InlineKeyboardButton(text="📈 Моя статистика", callback_data="user:my_stats"),
         ])
-
-    if show_week_widget:
-        rows.append([InlineKeyboardButton(text="Моя неделя", callback_data="user:week_widget")])
 
     rows.append([InlineKeyboardButton(text="ℹ️ Помощь", callback_data="nav:help:user")])
 
@@ -423,7 +416,7 @@ def user_panel_keyboard(
 
 
 def user_status_navigation_keyboard(
-    *, is_privileged: bool = False, poll_url: str | None = None,
+    *, is_privileged: bool = False,
 ) -> InlineKeyboardMarkup:
     """
     Клавиатура навигации для экрана "Сегодня".
@@ -437,15 +430,26 @@ def user_status_navigation_keyboard(
         ],
         [
             InlineKeyboardButton(text="🔄 Обновить", callback_data="user:today"),
-            InlineKeyboardButton(text="🗓 Месяц", callback_data="user:month"),
+            InlineKeyboardButton(text=USER_CALENDAR_TITLE, callback_data="user:calendar"),
         ],
     ]
 
-    if poll_url:
-        rows.insert(0, [InlineKeyboardButton(text="Перейти к опросу", url=poll_url)])
     rows.extend(build_user_nav_footer(back_target="user", is_privileged=is_privileged))
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def user_calendar_tabs(active: Literal["week", "month", "absences"]) -> list[InlineKeyboardButton]:
+    tabs = (
+        ("week", "Неделя", "user:calendar"),
+        ("month", "Месяц", "user:month"),
+        ("absences", "Отсутствия", "user:my_statuses"),
+    )
+    return [
+        InlineKeyboardButton(text=f"• {label}", callback_data="nav:ignore")
+        if tab == active else InlineKeyboardButton(text=label, callback_data=callback)
+        for tab, label, callback in tabs
+    ]
 
 
 def user_month_navigation_keyboard(
@@ -465,6 +469,7 @@ def user_month_navigation_keyboard(
         is_privileged: True если пользователь MANAGER или ADMIN.
     """
     rows = [
+        user_calendar_tabs("month"),
         # Переключение месяцев
         [
             InlineKeyboardButton(text="◀️ Пред.", callback_data=f"user:month:nav:{year}:{month}:prev"),
@@ -1025,11 +1030,7 @@ def my_statuses_keyboard(
             ),
         ])
 
-    if not buttons:
-        buttons.append([
-            InlineKeyboardButton(text="(нет статусов)", callback_data="nav:back:user"),
-        ])
-    else:
+    if buttons:
         # Пагинация (если больше одной страницы)
         if total_pages > 1:
             pagination_row = []
@@ -1051,6 +1052,8 @@ def my_statuses_keyboard(
             InlineKeyboardButton(text="🗑️ Отменить все", callback_data="status:clear_all"),
         ])
 
+    buttons.insert(0, user_calendar_tabs("absences"))
+    buttons.append([REPORT_ABSENCE_BUTTON])
     # Правило D: навигация только для MANAGER/ADMIN
     buttons.extend(build_user_nav_footer(back_target="user", is_privileged=is_privileged))
 
