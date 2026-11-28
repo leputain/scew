@@ -45,7 +45,6 @@ from core.screw_core.utils.calendar import (
 from core.screw_core.utils.logging import get_logger
 
 from core.screw_core.services.checks import ChecksService
-from core.screw_core.services.notify import NotifyService
 from core.screw_core.services.permissions import OZKO_DEPARTMENT_ID
 
 logger = get_logger(__name__)
@@ -394,7 +393,8 @@ async def job_poll_auto_close(
         return
 
     # Закрываем опрос в БД
-    await PollsRepo.close_poll(poll_id)
+    if not await PollsRepo.close_poll(poll_id, telegram_poll_id=telegram_poll_id, publish_summary=True):
+        return
     logger.info("AUTO_CLOSE_POLL poll_id=%s — закрыт в БД", poll_id)
 
     # Останавливаем Telegram poll (best-effort)
@@ -452,38 +452,6 @@ async def job_poll_auto_close(
     else:
         logger.warning("AUTO_CLOSE_POLL poll_id=%s — бот не инициализирован", poll_id)
 
-    # Ждём доставки последних голосов от Telegram, затем проверки
-    if _bot_instance:
-        await asyncio.sleep(10)
-        tz = get_tzinfo(SCHEDULER_TIMEZONE)
-        fallback_date = datetime.now(tz).date()
-        check_date = poll.get("poll_date") if isinstance(poll.get("poll_date"), date) else fallback_date
-        try:
-            await asyncio.wait_for(
-                NotifyService.run_post_poll_checks(
-                    _bot_instance,
-                    check_date,
-                    department_id=OZKO_DEPARTMENT_ID,
-                    poll_id=poll_id,
-                ),
-                timeout=120,
-            )
-        except Exception as e:
-            logger.error("AUTO_CLOSE_POLL poll_id=%s — ошибка отправки нарушений: %s", poll_id, e)
-        try:
-            from apps.attendance_bot.app.services.poll_runtime import (
-                send_department_lists_summary,
-                send_poll_close_summary,
-            )
-
-            await send_poll_close_summary(
-                _bot_instance,
-                poll,
-                department_id=OZKO_DEPARTMENT_ID,
-            )
-            await send_department_lists_summary(_bot_instance, poll)
-        except Exception as e:
-            logger.error("AUTO_CLOSE_POLL poll_id=%s — ошибка отправки итогов: %s", poll_id, e)
 
 
 def schedule_poll_auto_close(

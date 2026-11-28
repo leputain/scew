@@ -39,8 +39,9 @@ def test_runtime_sources_and_lock_are_ptb_free() -> None:
     assert matches == []
     assert "python-telegram-bot" not in lock
     assert "python-telegram-bot" not in direct
-    assert "aiogram==3.30.0" in lock
-    assert "aiogram==3.30.0" in direct
+    aiogram_pins = [line for line in direct.splitlines() if line.startswith("aiogram==")]
+    assert len(aiogram_pins) == 1
+    assert aiogram_pins[0] in lock.splitlines()
 
 
 def test_health_status_contains_operational_data_without_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:

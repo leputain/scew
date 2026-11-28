@@ -119,6 +119,7 @@ async def send_system_message(
     disable_link_preview: bool = True,
     reaction_emoji: str | None = None,
     delivery_mode: TelegramDeliveryMode = "rich_first",
+    strict_rich_fallback: bool = False,
 ) -> TelegramSendResult:
     """
     Send a system message via rich Telegram API with HTML fallback.
@@ -160,10 +161,11 @@ async def send_system_message(
                     reaction_set=reaction_set,
                 )
             except Exception as exc:
-                logger.warning(
-                    "telegram_delivery: rich send failed, retrying as HTML: %s",
-                    str(exc)[:120],
-                )
+                from aiogram.exceptions import TelegramBadRequest
+
+                if strict_rich_fallback and not isinstance(exc, TelegramBadRequest):
+                    raise
+                logger.warning("telegram_delivery: rich send rejected, using HTML (%s)", type(exc).__name__)
 
     kwargs: dict[str, Any] = {
         "chat_id": chat_id,

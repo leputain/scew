@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ru">
+<meta charset="utf-8">
+<h3 id="title">Моя неделя</h3>
+<ul id="days"></ul>
+<p>
+  <button id="previous" aria-label="Предыдущая неделя">←</button>
+  <button id="current">Текущая</button>
+  <button id="next" aria-label="Следующая неделя">→</button>
+  <button id="refresh">Обновить</button>
+</p>
+<p id="status" aria-live="polite"></p>
+<script>
+  const widget = TelegramWidget;
+  const element = (id) => document.getElementById(id);
+  let week;
+  function render() {
+    try { week = JSON.parse(widget.chatData); } catch { return; }
+    if (!week) return;
+    element("title").textContent = "Моя неделя · " + week.title;
+    const list = element("days");
+    list.textContent = "";
+    for (const [date, status] of week.days) {
+      const row = document.createElement("li");
+      row.textContent = date + " · " + status;
+      list.appendChild(row);
+    }
+  }
+  for (const action of ["previous", "current", "next", "refresh"]) {
+    element(action).addEventListener("click", () => {
+      if (!week) return;
+      element("status").textContent = "Загрузка…";
+      widget.request("screw-week:" + week[action]).then(
+        ({result}) => { element("status").textContent = result || ""; },
+        () => { element("status").textContent = "Не удалось обновить. Откройте «Мой календарь»."; }
+      );
+    });
+  }
+  widget.onEvent("chatDataChanged", render);
+  render();
+  widget.ready();
+</script>
+</html>

@@ -14,6 +14,7 @@ from apps.attendance_bot.app.aiogram_app.middlewares import (
     AiogramIngressMiddleware,
     AiogramSecurityPolicyMiddleware,
 )
+from apps.attendance_bot.app.aiogram_app.routers.week_widget import router as week_widget_router
 from apps.attendance_bot.app.aiogram_app.routers.admin import router as admin_router
 from apps.attendance_bot.app.aiogram_app.routers.admin_panel import router as admin_panel_router
 from apps.attendance_bot.app.aiogram_app.routers.chat_member import router as chat_member_router
@@ -33,6 +34,7 @@ logger = get_logger(__name__)
 ALLOWED_UPDATES = [
     "message",
     "callback_query",
+    "widget_query",
     "chat_member",
     "my_chat_member",
     "poll_answer",
@@ -41,6 +43,7 @@ ALLOWED_UPDATES = [
 ]
 AIOGRAM_ROUTERS = (
     start_router,
+    week_widget_router,
     poll_router,
     report_router,
     admin_router,

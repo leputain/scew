@@ -25,6 +25,7 @@ def to_aiogram_markup(markup) -> InlineKeyboardMarkup | None:
                     switch_inline_query=data.get("switch_inline_query"),
                     switch_inline_query_current_chat=data.get("switch_inline_query_current_chat"),
                     pay=data.get("pay"),
+                    style=data.get("style"),
                 )
             )
         rows.append(converted_row)

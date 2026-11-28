@@ -7,7 +7,7 @@
 from datetime import date
 from typing import Any
 
-from core.screw_core.db.tx import acquire_connection
+from core.screw_core.db.tx import acquire_connection, transaction
 from core.screw_core.models.enums import AttendanceChoice
 
 
@@ -52,6 +52,68 @@ class AttendanceRepo:
                 source,
             )
             return mark_id
+
+    @staticmethod
+    async def apply_poll_answer(
+        telegram_poll_id: str,
+        user_id: int,
+        choice: AttendanceChoice | None,
+        update_id: int,
+    ) -> None:
+        """Apply a vote or retraction to the currently matching poll generation."""
+        async with transaction() as conn:
+            poll = await conn.fetchrow(
+                """
+                SELECT id, poll_date
+                FROM screw.poll_runs
+                WHERE telegram_poll_id = $1
+                  AND (status = 'open' OR (
+                      summary_pending AND closed_at > NOW() - INTERVAL '60 seconds'
+                  ))
+                FOR UPDATE
+                """,
+                telegram_poll_id,
+            )
+            if not poll:
+                return
+            poll_id, poll_date = poll["id"], poll["poll_date"]
+            accepted = await conn.fetchval(
+                """
+                INSERT INTO screw.poll_vote_updates (poll_run_id, user_id, update_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (poll_run_id, user_id) DO UPDATE
+                SET update_id = EXCLUDED.update_id
+                WHERE poll_vote_updates.update_id < EXCLUDED.update_id
+                RETURNING update_id
+                """,
+                poll_id, user_id, update_id,
+            )
+            if accepted is None:
+                return
+            if choice is None:
+                await conn.execute(
+                    """
+                    DELETE FROM screw.attendance_marks
+                    WHERE poll_run_id = $1 AND user_id = $2 AND source = 'poll'
+                    """,
+                    poll_id, user_id,
+                )
+                return
+            await conn.execute(
+                """
+                INSERT INTO screw.attendance_marks
+                    (user_id, mark_date, choice, poll_run_id, source)
+                SELECT $1, $2, $3, $4, 'poll'
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM screw.user_day_statuses
+                    WHERE user_id = $1 AND status_date = $2 AND kind IN ('VACATION', 'SICK', 'LEAVE')
+                )
+                ON CONFLICT (user_id, mark_date) DO UPDATE
+                SET choice = EXCLUDED.choice, poll_run_id = EXCLUDED.poll_run_id, updated_at = NOW()
+                WHERE attendance_marks.source = 'poll'
+                """,
+                user_id, poll_date, choice.value, poll_id,
+            )
 
     @staticmethod
     async def get_mark(user_id: int, mark_date: date) -> dict[str, Any] | None:

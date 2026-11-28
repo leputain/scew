@@ -110,12 +110,15 @@ class DayStatusRepo:
             return dict(row) if row else None
 
     @staticmethod
-    async def get_statuses_for_date(status_date: date) -> list[dict[str, Any]]:
+    async def get_statuses_for_date(
+        status_date: date, *, department_id: int | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Получить все статусы на дату с end_date (последний день подряд).
 
         Args:
             status_date: Дата.
+            department_id: Фильтр по активным сотрудникам подразделения.
 
         Returns:
             Список статусов с полем end_date — последний день статуса.
@@ -130,6 +133,7 @@ class DayStatusRepo:
                     FROM screw.user_day_statuses uds
                     JOIN screw.users u ON uds.user_id = u.id
                     WHERE uds.status_date = $1
+                      AND ($2::int IS NULL OR (u.department_id = $2 AND u.status = 'active'))
                 ),
                 -- Для каждого пользователя находим end_date: последний подряд идущий день
                 -- с тем же kind начиная от status_date
@@ -163,6 +167,7 @@ class DayStatusRepo:
                 ORDER BY cs.full_name
                 """,
                 status_date,
+                department_id,
             )
             return [dict(row) for row in rows]
 

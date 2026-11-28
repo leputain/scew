@@ -7,6 +7,7 @@ Telegram markups so aiogram and legacy adapters can convert them locally.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class KeyboardButtonSpec:
     switch_inline_query: str | None = None
     switch_inline_query_current_chat: str | None = None
     pay: bool | None = None
+    style: Literal["primary", "success", "danger"] | None = None
 
     def to_dict(self) -> dict[str, object]:
         data: dict[str, object] = {"text": self.text}
@@ -26,6 +28,7 @@ class KeyboardButtonSpec:
             ("switch_inline_query", self.switch_inline_query),
             ("switch_inline_query_current_chat", self.switch_inline_query_current_chat),
             ("pay", self.pay),
+            ("style", self.style),
         ):
             if value is not None:
                 data[key] = value

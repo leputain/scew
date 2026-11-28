@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -13,6 +14,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from apps.attendance_bot.app.aiogram_app.keyboards import to_aiogram_markup
 from apps.attendance_bot.app.config import is_dev_self_registration_enabled
+from apps.attendance_bot.app.services.poll_runtime import format_time, get_local_date, get_local_datetime
 from apps.attendance_bot.app.ui.registration_texts import (
     MSG_ALREADY_REGISTERED,
     MSG_ASK_FULL_NAME,
@@ -26,6 +28,7 @@ from apps.attendance_bot.app.ui.registration_texts import (
 from apps.attendance_bot.app.ui import start_views
 from apps.attendance_bot.app.ui.keyboards_neutral import (
     DEPT_NAMES,
+    USER_CALENDAR_TITLE,
     build_user_nav_footer,
     compress_days_to_ranges,
     format_date_range,
@@ -151,7 +154,7 @@ async def _edit_root_menu(callback: CallbackQuery) -> None:
     )
 
 
-async def _edit_user_panel(callback: CallbackQuery) -> None:
+async def edit_user_panel(callback: CallbackQuery) -> None:
     if not callback.from_user:
         return
     telegram_id = callback.from_user.id
@@ -261,7 +264,7 @@ async def nav_home(callback: CallbackQuery) -> None:
 async def nav_user_panel(callback: CallbackQuery) -> None:
     if await _reject_if_group_callback(callback):
         return
-    await _edit_user_panel(callback)
+    await edit_user_panel(callback)
     await callback.answer()
 
 
@@ -302,7 +305,7 @@ async def user_today(callback: CallbackQuery) -> None:
         return
 
     telegram_id = callback.from_user.id
-    today = date.today()
+    today = get_local_date()
     user = await UsersRepo.get_by_telegram_id(telegram_id)
     if not user:
         await _edit_callback_message(
@@ -317,7 +320,7 @@ async def user_today(callback: CallbackQuery) -> None:
     perms = await get_permissions(telegram_id)
     is_privileged = perms.is_manager or perms.is_admin
     user_id = user["id"]
-    full_name = user.get("full_name") or "—"
+    full_name = escape(user.get("full_name") or "—")
     status = await DayStatusRepo.get_status(user_id, today)
     attendance_mark = await AttendanceRepo.get_mark(user_id, today)
     weekday = start_views.WEEKDAY_NAMES_SHORT[today.weekday()]
@@ -333,15 +336,33 @@ async def user_today(callback: CallbackQuery) -> None:
         status_label = start_views.STATUS_LABELS.get(kind, kind)
         text += f"📋 Статус: {status_label}"
         if status.get("comment"):
-            text += f"\n💬 {status.get('comment')}"
+            text += f"\n💬 {escape(str(status['comment']))}"
     else:
         text += "📋 Статус: <i>обычный рабочий день</i>"
 
-    if attendance_mark:
-        choice = attendance_mark.get("choice", "")
-        text += f"\n✅ Опрос: {start_views.ATTENDANCE_CHOICE_LABELS.get(choice, choice)}"
+    poll = await PollsRepo.get_by_date(today)
+    closes_at = poll.get("closes_at") if poll else None
+    poll_open = bool(
+        poll and poll["status"] == "open" and (
+            not closes_at or (closes_at if closes_at.tzinfo else closes_at.replace(
+                tzinfo=get_local_datetime().tzinfo
+            )) > get_local_datetime()
+        )
+    )
+    if status and status["kind"] in {"VACATION", "SICK", "LEAVE"}:
+        text += "\nОпрос: сегодня ответ не ожидается"
+    elif attendance_mark:
+        choice = attendance_mark["choice"]
+        text += f"\n✅ Отметка: {start_views.ATTENDANCE_CHOICE_LABELS.get(choice, choice)}"
+    elif poll_open:
+        text += "\n⏳ Опрос в рабочей группе: <i>ответ ещё не получен</i>"
+    elif poll:
+        text += "\nОпрос закрыт · отметки нет"
     else:
-        text += "\n⏳ Опрос: <i>не отмечено</i>"
+        text += "\nОпрос пока не опубликован"
+
+    if poll_open and closes_at:
+        text += f"\nЗакрытие опроса в <b>{format_time(closes_at)}</b>"
 
     if is_privileged:
         try:
@@ -393,7 +414,7 @@ async def user_today(callback: CallbackQuery) -> None:
 
 async def _render_month_view(callback: CallbackQuery, user: dict, year: int, month: int, is_privileged: bool) -> None:
     user_id = user["id"]
-    full_name = user.get("full_name") or "—"
+    full_name = escape(user.get("full_name") or "—")
     start_of_month = date(year, month, 1)
     if month == 12:
         end_of_month = date(year + 1, 1, 1) - timedelta(days=1)
@@ -406,7 +427,7 @@ async def _render_month_view(callback: CallbackQuery, user: dict, year: int, mon
         user_ids=[user_id],
     )
     month_text = format_month_ru(year, month)
-    text = f"🗓 <b>Месяц</b> ({month_text})\n\n👤 {full_name}\n\n"
+    text = f"<b>{USER_CALENDAR_TITLE} · Месяц</b>\n<i>{month_text}</i>\n\n👤 {full_name}\n\n"
     if statuses:
         days_with_status = [
             (status_date, kind)

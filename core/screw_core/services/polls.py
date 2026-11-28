@@ -12,13 +12,15 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Any
 
-from core.screw_core.repos.polls_repo import PollsRepo
+from core.screw_core.repos.polls_repo import PollOptionSnapshot, PollsRepo
 
 
 class PollError(StrEnum):
     """Ошибки при работе с опросами."""
 
     POLL_NOT_FOUND = "poll_not_found"
+    POLL_ALREADY_OPEN = "poll_already_open"
+    POLL_PERSIST_FAILED = "poll_persist_failed"
     POLL_ALREADY_CLOSED = "poll_already_closed"
 
 
@@ -42,6 +44,7 @@ class PollsService:
         message_id: int | None = None,
         telegram_poll_id: str | None = None,
         closes_at: datetime | None = None,
+        option_snapshot: list[PollOptionSnapshot] | None = None,
     ) -> PollResult:
         """
         Создать или пересоздать ежедневный опрос (UPSERT).
@@ -67,8 +70,11 @@ class PollsService:
         is_recreate = existing is not None
 
         poll_id, deleted_marks = await PollsRepo.create_poll_with_expected_users(
-            poll_date, chat_id, message_id, telegram_poll_id, closes_at
+            poll_date, chat_id, message_id, telegram_poll_id, closes_at, option_snapshot
         )
+
+        if poll_id is None:
+            return PollResult(success=False, error=PollError.POLL_ALREADY_OPEN)
 
         return PollResult(
             success=True,
@@ -120,7 +126,8 @@ class PollsService:
         if poll["status"] != "open":
             return PollResult(success=False, error=PollError.POLL_ALREADY_CLOSED)
 
-        await PollsRepo.close_poll(poll_id)
+        if not await PollsRepo.close_poll(poll_id, telegram_poll_id=poll.get("telegram_poll_id")):
+            return PollResult(success=False, error=PollError.POLL_ALREADY_CLOSED)
         return PollResult(success=True, poll_id=poll_id, data=poll)
 
     @staticmethod
@@ -135,7 +142,11 @@ class PollsService:
         if not poll:
             return PollResult(success=False, error=PollError.POLL_NOT_FOUND)
 
-        await PollsRepo.close_poll(poll["id"])
+        if not await PollsRepo.close_poll(
+            poll["id"], telegram_poll_id=poll.get("telegram_poll_id"), publish_summary=True,
+            summary_ignore_day_off=True,
+        ):
+            return PollResult(success=False, error=PollError.POLL_ALREADY_CLOSED)
         return PollResult(success=True, poll_id=poll["id"], data=poll)
 
     @staticmethod
